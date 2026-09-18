@@ -2,13 +2,20 @@
 
 /* eslint-disable @next/next/no-img-element */
 
-import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback, useSyncExternalStore } from "react";
 import Map, { Marker, Source, Layer, MapRef } from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { ArrowUp, Compass, CornerUpLeft, CornerUpRight, MoveUpLeft, MoveUpRight, Undo2, Volume2, VolumeX, Navigation as NavIcon } from "lucide-react";
 import { useRouter } from "next/router";
 import { AdaptivePollingService } from "@/services/pollingService";
 import { NavigationProvider, useNavigation } from "@/hooks/useNavigation";
+import type { TargetReference } from "@/hooks/useNavigation";
+import ResearchLogPanel from "@/components/research/ResearchLogPanel";
+import {
+    appendResearchProvenanceEvent,
+    getResearchLoggerSnapshot,
+    subscribeResearchLogger,
+} from "@/lib/research/provenanceEvents";
 import {
     resolveNavigationTopBarPresentation,
     resolveRouteUxBanner,
@@ -668,6 +675,11 @@ function projectPointToRouteStable(
 function NavigationScreen() {
     const router = useRouter();
     const mapRef = useRef<MapRef>(null);
+    const researchLogger = useSyncExternalStore(
+        subscribeResearchLogger,
+        getResearchLoggerSnapshot,
+        getResearchLoggerSnapshot,
+    );
 
     const queryResult = router.isReady ? parseNavigationQuery(router.query) : null;
     const pollingUsersId = queryResult?.ok ? queryResult.value.usersId : null;
@@ -695,17 +707,26 @@ function NavigationScreen() {
         return { lat: 0, lng: 0 };
     });
 
-    const [patientLocation, setPatientLocation] = useState(() => {
+    const [patientLocation, setPatientLocation] = useState<TargetReference>(() => {
         if (typeof window !== "undefined") {
             try {
                 const stored = localStorage.getItem('afe_navigation_session');
                 if (stored) {
                     const data = JSON.parse(stored);
-                    if (data.targetPos && data.targetPos.lat) return data.targetPos;
+                    if (data.targetPos && data.targetPos.lat) {
+                        return {
+                            lat: data.targetPos.lat,
+                            lng: data.targetPos.lng,
+                            targetSampleId:
+                                typeof data.targetPos.targetSampleId === 'string'
+                                    ? data.targetPos.targetSampleId
+                                    : null,
+                        };
+                    }
                 }
             } catch (e) {}
         }
-        return { lat: 0, lng: 0 };
+        return { lat: 0, lng: 0, targetSampleId: null };
     });
     const [visualPatientLocation, setVisualPatientLocation] = useState<LatLngPoint>(patientLocation);
     const markerSmoothingDecisionRef = useRef<{
@@ -757,7 +778,7 @@ function NavigationScreen() {
     const [totalDistance, setTotalDistance] = useState(0);
 
     // --- 💡 State สำหรับ MT-D* Lite ---
-    const { path, maneuverRoute, status, routeUxState, sessionId, start, stop, markArrived, eta, distance, updatePositions, routeVersion, routeSourceKey, endpointDiagnostics, restoreChecked, freshStartSequence } = useNavigation();
+    const { path, maneuverRoute, status, routeUxState, sessionId, start, stop, markArrived, eta, distance, updatePositions, routeVersion, routeSourceKey, endpointDiagnostics, restoreChecked, freshStartSequence, routeCandidateProvenance } = useNavigation();
     // ── Motion presentation state ───────────────────────────────────────────
 
     // displayAgentPosition: projected agent position on the route — drives marker rendering.
@@ -835,6 +856,7 @@ function NavigationScreen() {
     // exactly once per ON-branch production attempt outcome (including a
     // trim-null clean hold and an unexpected construction error), and is never reset within the component's lifetime.
     const productionTransactionGenerationRef = useRef<number>(0);
+    const routeActivationSeqRef = useRef<number>(0);
     // PR2a-1C-C4-A: session-scoped transaction auto-disable state. Reset only
     // when the navigation session identity (sessionId) changes — never on
     // routeSourceKey/routeVersion change, Mapbox replacement, or an
@@ -957,6 +979,19 @@ function NavigationScreen() {
         const lastPointMoveM = previousLast ? distanceMeters(previousLast, nextLast) : Infinity;
         const sameSignature = previousSignature === nextSignature;
         const sameBody = previousBodySignature === nextBodySignature;
+        const recordRouteActivation = () => {
+            if (!routeCandidateProvenance) return;
+            const routeActivationSeq = routeActivationSeqRef.current + 1;
+            routeActivationSeqRef.current = routeActivationSeq;
+            appendResearchProvenanceEvent({
+                event: 'route_active',
+                system_version: 'V3',
+                ...routeCandidateProvenance,
+                route_activation_seq: routeActivationSeq,
+                route_version: routeVersion,
+                route_signature: nextSignature,
+            });
+        };
         const applySourcePathLegacy = (reason: string) => {
             const nextPath = candidate.map((point) => ({ lat: point.lat, lng: point.lng }));
             stableRouteSourcePathRef.current = nextPath;
@@ -979,6 +1014,7 @@ function NavigationScreen() {
                 displayRouteSourcePathRef.current = nextPath;
                 setDisplayRouteSourcePath(nextPath);
             }
+            recordRouteActivation();
         };
 
         // ── PR2a-1C-B2: gate-OFF legacy wrapper (NO TRANSACTION BEHAVIOR) ─────
@@ -1121,6 +1157,7 @@ function NavigationScreen() {
                     applySourcePathLegacy(reason);
                     break;
                 case 'TRANSACTION_COMMITTED':
+                    recordRouteActivation();
                     break;
                 case 'AUTO_DISABLE_NO_FALLBACK':
                     if (sessionTransactionAutoDisableSessionIdRef.current === sessionId) {
@@ -1224,7 +1261,7 @@ function NavigationScreen() {
             }
         }
 
-    }, [path, routeVersion, status, endpointDiagnostics]);
+    }, [path, routeVersion, status, endpointDiagnostics, routeCandidateProvenance]);
 
     // State สำหรับ UI
     const [arrivalTime, setArrivalTime] = useState("--:--");
@@ -2761,10 +2798,19 @@ function NavigationScreen() {
             (location) => {
                 if (!location.latitude || !location.longitude) return;
 
-                const nextTarget = {
+                const nextTarget: TargetReference = {
                     lat: Number(location.latitude),
                     lng: Number(location.longitude),
+                    targetSampleId: location.targetSampleId,
                 };
+
+                appendResearchProvenanceEvent({
+                    event: 'target_received',
+                    system_version: 'V3',
+                    target_sample_id: nextTarget.targetSampleId,
+                    target_ref_lat: nextTarget.lat,
+                    target_ref_lng: nextTarget.lng,
+                });
 
                 setPatientLocation(nextTarget);
 
@@ -2851,6 +2897,8 @@ function NavigationScreen() {
         if (!restoreChecked) return;
         if (pollingUsersId === null || pollingTakecareId === null) return;
         if (!hasRealGpsPosition || !hasRealTargetPosition) return;
+        // Research-only startup gate: run_start must exist before initial /init.
+        if (researchLogger.status !== 'RECORDING') return;
         if (sessionId || status !== 'idle') return;
         if (initInFlightRef.current) return;
 
@@ -2870,6 +2918,7 @@ function NavigationScreen() {
                     {
                         lat: patientLocation.lat,
                         lng: patientLocation.lng,
+                        targetSampleId: patientLocation.targetSampleId,
                     },
                 );
             } finally {
@@ -2883,6 +2932,7 @@ function NavigationScreen() {
         pollingUsersId,
         hasRealGpsPosition,
         hasRealTargetPosition,
+        researchLogger.status,
         restoreChecked,
         sessionId,
         start,
@@ -2903,6 +2953,7 @@ function NavigationScreen() {
             {
                 lat: patientLocation.lat,
                 lng: patientLocation.lng,
+                targetSampleId: patientLocation.targetSampleId,
             },
         );
     }, [
@@ -3485,6 +3536,7 @@ function NavigationScreen() {
 
     return (
         <main className="relative w-full h-[100dvh] bg-[#EFEFEF] overflow-hidden font-sans">
+            <ResearchLogPanel className="absolute left-3 top-[96px] z-30" />
             <div
                 className="absolute inset-0"
                 onTouchStart={handleMapTouchStart}

@@ -31,6 +31,14 @@ import { shouldCallMapbox } from '@/lib/navigation/navigation-policy';
 import { fetchMultiProfileDirections } from '@/lib/navigation/mapbox.client';
 import { buildTargetCenteredGraph, TARGET_GRAPH_RADIUS_M, countConnectedComponents } from '@/lib/navigation/bubble.graph';
 import {
+  finishBackendM1CandidateFromResponse,
+  getBackendResearchEvents,
+  markBackendM1CandidateReady,
+  researchContextFromRequestBody,
+  startBackendM1Candidate,
+  withBackendResearchContext,
+} from '@/lib/research/backendResearch';
+import {
   loadSession,
   acquireSessionLock,
   releaseSessionLock,
@@ -441,7 +449,7 @@ function prepareRenderablePath(input: PrepareRenderablePathInput): PreparedRende
   });
 }
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
+async function handleRequest(req: NextApiRequest, res: NextApiResponse): Promise<void> {
   if (req.method !== 'POST') {
     res.setHeader('Allow', ['POST']);
     res.status(405).json({
@@ -449,6 +457,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
     return;
   }
+
+  let routeProvenance: UpdateResponse['routeProvenance'] = null;
 
   // HTTP adapter note (Phase 2B): json()/lockFailureResponse() were originally
   // top-level helpers that called NextResponse.json() (App Router). Pages API
@@ -458,7 +468,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   // changed: json() still centralizes withResponseDefaults() the same way,
   // and every one of the ~30 call sites below is untouched.
   function json(body: UpdateResponse, init?: ResponseInit): void {
-    res.status(init?.status ?? 200).json(withResponseDefaults(body));
+    const responseBody = withResponseDefaults(body);
+    finishBackendM1CandidateFromResponse(responseBody);
+    res.status(init?.status ?? 200).json({
+      ...responseBody,
+      routeProvenance,
+      research_events: getBackendResearchEvents(),
+    });
   }
 
   // M4-B1.5: every lock-related failure shares the identical frontend-safe
@@ -488,8 +504,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   let lockedSessionId: string | null = null;
   try {
     const body: unknown = req.body;
-    const { sessionId, agentPos, targetPos, costChanges } =
-      validateBody(UpdateRequestSchema, body);
+    const parsed = validateBody(UpdateRequestSchema, body);
+    const { sessionId, agentPos, targetPos, costChanges } = parsed;
+    routeProvenance = parsed.routeProvenance ?? null;
 
     // 0. Acquire the session lock BEFORE any session read — covers loadSession,
     // planner computation, Mapbox/refetch work, and every session commit for
@@ -1541,6 +1558,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // 5. MT-D* Lite incremental step — THE decision maker
     const planner = MTDStarLitePlanner.deserialize(session.graph, session.plannerState);
+    startBackendM1Candidate();
     const stepStart = Date.now();
     const result = planner.step(aId, tId, costChanges);
     const selectedTraversal = result.success
@@ -2805,6 +2823,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       routeGoalType === 'EDGE_PROJECTION' &&
       finalEndpointDistanceM !== null &&
       finalEndpointDistanceM > 1;
+    markBackendM1CandidateReady();
 
     log.info({
       sessionId,
@@ -3093,6 +3112,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await releaseSessionLock(lockedSessionId, lockToken);
     }
   }
+}
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
+  const context = researchContextFromRequestBody(req.body, 'update');
+  return withBackendResearchContext(context, () => handleRequest(req, res));
 }
 
 // ─── Phase 7F-3B: truth context enriched into every stored metric ─────────────

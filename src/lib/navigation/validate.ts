@@ -17,10 +17,20 @@ export const CostChangeSchema = z.object({
   newCost: z.number().nonnegative(),
 });
 
+export const RouteProvenanceSchema = z.object({
+  route_update_id: z.string().min(1).max(200),
+  target_sample_id: z.string().min(1).max(200).nullable(),
+  target_ref_lat: z.number().min(-90).max(90),
+  target_ref_lng: z.number().min(-180).max(180),
+  research_run_id: z.string().min(1).max(200).optional(),
+  research_request_phase: z.enum(['init', 'restore', 'incremental']).optional(),
+});
+
 // ─── POST /api/navigate/init ──────────────────────────────────────────────────
 export const InitRequestSchema = z.object({
   agentPos: CoordinateSchema,
   targetPos: CoordinateSchema,
+  routeProvenance: RouteProvenanceSchema.nullish().transform((value) => value ?? null),
 });
 
 // ─── POST /api/navigate/update ────────────────────────────────────────────────
@@ -28,6 +38,7 @@ export const UpdateRequestSchema = z.object({
   sessionId: z.string().min(1),
   agentPos: CoordinateSchema,
   targetPos: CoordinateSchema,
+  routeProvenance: RouteProvenanceSchema.nullish().transform((value) => value ?? null),
   costChanges: z.array(CostChangeSchema).optional().default([]),
 });
 

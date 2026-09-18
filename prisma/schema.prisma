@@ -112,6 +112,7 @@ model location {
   users_id          Int
   takecare_id       Int
   location_id       Int            @id @default(autoincrement())
+  target_sample_id  String?
   locat_timestamp   DateTime       @db.Date
   locat_latitude    String         @default("0") @db.VarChar(255)
   locat_longitude   String         @default("0") @db.VarChar(255)

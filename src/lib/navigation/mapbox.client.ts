@@ -2,6 +2,7 @@ import type { Coordinate, MapboxDirectionsResponse } from '@/lib/navigation/type
 import { CircuitBreaker } from './circuit-breaker';
 import { createLogger, MapboxApiError } from './logger';
 import { env } from '@/config/navigation-env';
+import { recordMapboxHttpAttempt } from '@/lib/research/backendResearch';
 
 const log = createLogger('mapbox-client');
 
@@ -54,6 +55,7 @@ export async function fetchDirections(
 
   const response = await breaker.execute(async () => {
     // AbortSignal.timeout สำหรับ hard timeout 5s
+    recordMapboxHttpAttempt(`profile/corridor:${profile}`);
     const res = await fetch(url.toString(), {
       method: 'GET',
       signal: AbortSignal.timeout(5_000),
@@ -159,6 +161,7 @@ export async function fetchDirectionsBubble(
   url.searchParams.set('annotations', 'distance,duration');
 
   const response = await bubbleBreaker.execute(async () => {
+    recordMapboxHttpAttempt('target_ray/bubble');
     const res = await fetch(url.toString(), {
       method: 'GET',
       signal: AbortSignal.timeout(4_000),

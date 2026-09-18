@@ -1,4 +1,5 @@
-import type { NavigationManeuver } from '@/lib/navigation/types';
+import type { NavigationManeuver, RouteProvenance } from '@/lib/navigation/types';
+import { appendBackendResearchEvents } from '@/lib/research/provenanceEvents';
 
 export interface LatLng {
   lat: number;
@@ -64,6 +65,7 @@ interface InitResponse {
   initFailureReason?: string | null;
   corridorNodeCount: number;
   estimatedTimeSeconds: number;
+  routeProvenance?: RouteProvenance | null;
 }
 
 interface ApiError {
@@ -107,6 +109,22 @@ interface UpdateResponse {
   endpointExtended?: boolean | null;
   endpointEnforced?: boolean | null;
   lastMetric?: UpdateMetric;
+  routeProvenance?: RouteProvenance | null;
+}
+
+async function extractResearchEvents(response: Response, researchRunId: string | null): Promise<void> {
+  if (!researchRunId) return;
+  try {
+    const body: unknown = await response.clone().json();
+    if (body && typeof body === 'object') {
+      appendBackendResearchEvents(
+        (body as { research_events?: unknown }).research_events,
+        researchRunId,
+      );
+    }
+  } catch {
+    // Research extraction is observational and never changes navigation handling.
+  }
 }
 
 export class NavigationService {
@@ -116,19 +134,33 @@ export class NavigationService {
     this.apiBase = '';
   }
 
-  async init(agentPos: LatLng, targetPos: LatLng, mode: NavigationMode = 'hybrid'): Promise<InitResponse | ApiError> {
+  async init(
+    agentPos: LatLng,
+    targetPos: LatLng,
+    mode: NavigationMode = 'hybrid',
+    routeProvenance: RouteProvenance | null = null,
+  ): Promise<InitResponse | ApiError> {
     try {
       const url = `${this.apiBase}/api/navigate/init`;
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentPos, targetPos, mode })
+        body: JSON.stringify({ agentPos, targetPos, mode, routeProvenance })
       });
+      const researchRunId = routeProvenance?.research_run_id ?? null;
       
-      if (res.status === 429) return { error: true, status: 429, rateLimit: true };
-      if (!res.ok) return { error: true, status: res.status };
+      if (res.status === 429) {
+        await extractResearchEvents(res, researchRunId);
+        return { error: true, status: 429, rateLimit: true };
+      }
+      if (!res.ok) {
+        await extractResearchEvents(res, researchRunId);
+        return { error: true, status: res.status };
+      }
       
-      return await res.json();
+      const body = await res.json();
+      appendBackendResearchEvents(body?.research_events, researchRunId);
+      return body;
     } catch (err: unknown) {
       return { error: true, status: 500, message: getErrorMessage(err) };
     }
@@ -139,6 +171,7 @@ export class NavigationService {
     agentPos: LatLng,
     targetPos: LatLng,
     signal?: AbortSignal,
+    routeProvenance: RouteProvenance | null = null,
   ): Promise<(UpdateResponse & { sessionExpired?: boolean }) | ApiError> {
     try {
       const url = `${this.apiBase}/api/navigate/update`;
@@ -149,17 +182,28 @@ export class NavigationService {
           sessionId,
           agentPos,
           targetPos,
+          routeProvenance,
         }),
         signal,
       });
+      const researchRunId = routeProvenance?.research_run_id ?? null;
 
       if (res.status === 404) {
+        await extractResearchEvents(res, researchRunId);
         return { sessionExpired: true } as UpdateResponse & { sessionExpired: true };
       }
-      if (res.status === 429) return { error: true, status: 429, rateLimit: true };
-      if (!res.ok) return { error: true, status: res.status };
+      if (res.status === 429) {
+        await extractResearchEvents(res, researchRunId);
+        return { error: true, status: 429, rateLimit: true };
+      }
+      if (!res.ok) {
+        await extractResearchEvents(res, researchRunId);
+        return { error: true, status: res.status };
+      }
 
-      return await res.json();
+      const body = await res.json();
+      appendBackendResearchEvents(body?.research_events, researchRunId);
+      return body;
     } catch (err: unknown) {
       // Rethrow AbortError so the caller can distinguish intentional cancellation
       if (err instanceof Error && err.name === 'AbortError') throw err;

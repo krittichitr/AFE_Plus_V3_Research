@@ -12,7 +12,12 @@ import { MTDStarLitePlanner } from '@/lib/navigation/mtdstar-lite';
 import { GPSKalmanFilter, haversine } from '@/lib/navigation/gps.smooth';
 import { generateSessionId, saveSession, getActiveSessionCount } from '@/lib/navigation/session.store';
 import { maneuversForPath } from '@/lib/navigation/maneuver.extractor';
-import type { InitResponse, NavDistanceMode } from '@/lib/navigation/types';
+import type { InitResponse, NavDistanceMode, RouteProvenance } from '@/lib/navigation/types';
+import {
+  getBackendResearchEvents,
+  researchContextFromRequestBody,
+  withBackendResearchContext,
+} from '@/lib/research/backendResearch';
 
 const log = createLogger('api/navigate/init');
 // Target-centered graph is always enabled — target is graph center, not the agent.
@@ -74,6 +79,7 @@ function buildInitResponse(input: {
   estimatedTimeSeconds?: number;
   rawPlannerPathLen?: number | null;
   maneuvers?: InitResponse['maneuvers'];
+  routeProvenance: RouteProvenance | null;
 }): InitResponse {
   logInitResponseContract({
     sessionId: input.sessionId,
@@ -122,10 +128,12 @@ function buildInitResponse(input: {
     graphNodeCount: input.graphNodeCount,
     graphEdgeCount: input.graphEdgeCount,
     initFailureReason: input.initFailureReason,
+    routeProvenance: input.routeProvenance,
+    research_events: getBackendResearchEvents(),
   };
 }
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
+async function handleRequest(req: NextApiRequest, res: NextApiResponse): Promise<void> {
   if (req.method !== 'POST') {
     res.setHeader('Allow', ['POST']);
     res.status(405).json({
@@ -136,9 +144,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const t0 = Date.now();
   let mapboxApiCalled = false;
+  let routeProvenance: RouteProvenance | null = null;
   try {
     const body: unknown = req.body;
-    const { agentPos, targetPos } = validateBody(InitRequestSchema, body);
+    const parsed = validateBody(InitRequestSchema, body);
+    const { agentPos, targetPos } = parsed;
+    routeProvenance = parsed.routeProvenance ?? null;
 
     // Determine navigation mode from direct distance
     const directDistM = haversine(agentPos.lat, agentPos.lng, targetPos.lat, targetPos.lng);
@@ -198,6 +209,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         graphNodeCount,
         graphEdgeCount,
         initFailureReason: 'graph_invalid',
+        routeProvenance,
       }));
       return;
     }
@@ -228,6 +240,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           graphNodeCount,
           graphEdgeCount,
           initFailureReason: 'same_node_arrived',
+          routeProvenance,
         }));
         return;
       }
@@ -249,6 +262,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           graphNodeCount,
           graphEdgeCount,
           initFailureReason: 'same_node_no_alternate',
+          routeProvenance,
         }));
         return;
       }
@@ -303,6 +317,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         graphEdgeCount,
         initFailureReason,
         rawPlannerPathLen,
+        routeProvenance,
       }));
       return;
     }
@@ -371,6 +386,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       graphEdgeCount,
       initFailureReason: responsePathSource === 'planner_prepared' ? null : initFailureReason,
       rawPlannerPathLen,
+      routeProvenance,
     }));
     return;
 
@@ -395,6 +411,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           graphNodeCount: null,
           graphEdgeCount: null,
           initFailureReason: 'graph_invalid',
+          routeProvenance,
         }),
       );
       return;
@@ -416,8 +433,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         graphNodeCount: null,
         graphEdgeCount: null,
         initFailureReason: 'graph_invalid',
+        routeProvenance,
       }),
     );
     return;
   }
+}
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
+  const context = researchContextFromRequestBody(req.body, 'init');
+  return withBackendResearchContext(context, () => handleRequest(req, res));
 }

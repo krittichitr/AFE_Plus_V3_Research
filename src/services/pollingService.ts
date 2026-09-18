@@ -10,6 +10,7 @@ type TargetLocationApiResponse =
             takecareId: number;
             lat: number;
             lng: number;
+            target_sample_id?: string | null;
             sourceTimestamp: string | null;
             status: number;
             battery: number;
@@ -23,6 +24,7 @@ type TargetLocationApiResponse =
 export type PolledLocation = {
     latitude: number;
     longitude: number;
+    targetSampleId: string | null;
     sourceTimestamp: string | null;
     status: number;
     battery: number;
@@ -117,6 +119,7 @@ export class AdaptivePollingService {
             this.onLocationUpdate({
                 latitude: data.lat,
                 longitude: data.lng,
+                targetSampleId: data.target_sample_id ?? null,
                 sourceTimestamp: data.sourceTimestamp,
                 status: data.status,
                 battery: data.battery,
@@ -186,6 +189,7 @@ function isTargetLocationApiResponse(value: unknown): value is TargetLocationApi
         typeof data.takecareId === 'number' &&
         typeof data.lat === 'number' &&
         typeof data.lng === 'number' &&
+        (data.target_sample_id === undefined || data.target_sample_id === null || typeof data.target_sample_id === 'string') &&
         (typeof data.sourceTimestamp === 'string' || data.sourceTimestamp === null) &&
         typeof data.status === 'number' &&
         typeof data.battery === 'number';

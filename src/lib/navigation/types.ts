@@ -4,6 +4,28 @@ export interface Coordinate {
   lng: number;
 }
 
+export interface RouteProvenance {
+  route_update_id: string;
+  target_sample_id: string | null;
+  target_ref_lat: number;
+  target_ref_lng: number;
+  research_run_id?: string;
+  research_request_phase?: 'init' | 'restore' | 'incremental';
+}
+
+export type BackendResearchEvent = {
+  event: 'route_update_start' | 'route_update_end' | 'mapbox_http_attempt';
+  research_run_id: string;
+  route_update_id: string;
+  target_sample_id: string | null;
+  target_ref_lat: number;
+  target_ref_lng: number;
+  source: 'backend';
+  server_wall_clock_ms: number;
+  backend_mono_ms: number;
+  [key: string]: unknown;
+};
+
 // ─── Graph (Corridor) ─────────────────────────────────────────────────────────
 export interface GraphNode {
   id: string;
@@ -329,6 +351,7 @@ export interface CostChange {
 export interface InitRequest {
   agentPos: Coordinate;
   targetPos: Coordinate;
+  routeProvenance?: RouteProvenance | null;
 }
 
 export interface InitResponse {
@@ -364,6 +387,8 @@ export interface InitResponse {
     | 'same_node_arrived'
     | 'same_node_no_alternate'
     | null;
+  routeProvenance?: RouteProvenance | null;
+  research_events?: BackendResearchEvent[];
 }
 
 export interface UpdateRequest {
@@ -371,6 +396,7 @@ export interface UpdateRequest {
   agentPos: Coordinate;
   targetPos: Coordinate;
   costChanges?: CostChange[];
+  routeProvenance?: RouteProvenance | null;
 }
 
 export interface UpdateResponse {
@@ -430,6 +456,8 @@ export interface UpdateResponse {
   endpointEnforced?: boolean | null;
   endpointTrimmed?: boolean | null;
   endpointExtended?: boolean | null;
+  routeProvenance?: RouteProvenance | null;
+  research_events?: BackendResearchEvent[];
 }
 
 // ─── Navigation Mode ──────────────────────────────────────────────────────────

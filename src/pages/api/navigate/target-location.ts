@@ -92,6 +92,7 @@ export default withRls(
         takecareId,
         lat,
         lng,
+        target_sample_id: latestLocation.target_sample_id ?? null,
         sourceTimestamp,
         status: Number(latestLocation.locat_status),
         battery: Number(latestLocation.locat_battery),

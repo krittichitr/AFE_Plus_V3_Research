@@ -4,7 +4,8 @@
 
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { NavigationService, LatLng, NavigationMode } from '@/lib/services/navigation.service';
-import type { NavigationManeuver } from '@/lib/navigation/types';
+import type { NavigationManeuver, RouteProvenance } from '@/lib/navigation/types';
+import { getRecordingResearchRunId } from '@/lib/research/provenanceEvents';
 
 const STORAGE_KEY = 'afe_navigation_session';
 const SESSION_TTL_MS = 15 * 60 * 1000;
@@ -15,9 +16,13 @@ const RESTORE_GPS_TIMEOUT_MS = 8_000;
 interface NavigationSessionData {
   sessionId: string;
   agentPos: LatLng;
-  targetPos: LatLng;
+  targetPos: TargetReference;
   timestamp: number;
 }
+
+export type TargetReference = LatLng & {
+  targetSampleId: string | null;
+};
 
 type StartResult = {
   sessionId: string;
@@ -62,7 +67,7 @@ type NavigationContextType = {
   routeUxState: RouteUxState;
   start: (
     agent: LatLng,
-    target: LatLng,
+    target: TargetReference,
     mode?: NavigationMode,
     gpsAgeMs?: number | null,
     announceFreshStart?: boolean,
@@ -73,12 +78,13 @@ type NavigationContextType = {
   eta: number;
   distance: number;
   corridorNodeCount: number;
-  updatePositions: (agent: LatLng, target: LatLng) => void;
+  updatePositions: (agent: LatLng, target: TargetReference) => void;
   routeVersion: number; // increments each time a valid path is successfully applied
   routeSourceKey: number; // stable Mapbox Source key — only increments on first route + Mapbox API refetch
   endpointDiagnostics: EndpointDiagnostics | null;
   restoreChecked: boolean;
   freshStartSequence: number;
+  routeCandidateProvenance: RouteProvenance | null;
 };
 
 const NavigationContext = createContext<NavigationContextType | null>(null);
@@ -110,6 +116,23 @@ function isValidCoordinate(point: unknown): point is LatLng {
   if (!point || typeof point !== 'object') return false;
   const coord = point as Partial<LatLng>;
   return Number.isFinite(coord.lat) && Number.isFinite(coord.lng) && !(coord.lat === 0 && coord.lng === 0);
+}
+
+function createRouteProvenance(
+  target: TargetReference,
+  researchRequestPhase: NonNullable<RouteProvenance['research_request_phase']>,
+): RouteProvenance {
+  const researchRunId = getRecordingResearchRunId();
+  return Object.freeze({
+    route_update_id: crypto.randomUUID(),
+    target_sample_id: target.targetSampleId,
+    target_ref_lat: target.lat,
+    target_ref_lng: target.lng,
+    ...(researchRunId ? {
+      research_run_id: researchRunId,
+      research_request_phase: researchRequestPhase,
+    } : {}),
+  });
 }
 
 function getFreshGpsPosition(): Promise<{ position: LatLng; ageMs: number }> {
@@ -228,6 +251,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
   // Observational only: increments after a successful user-visible /init.
   // Restore and silent server-session replacement never increment it.
   const [freshStartSequence, setFreshStartSequence] = useState(0);
+  const [routeCandidateProvenance, setRouteCandidateProvenance] = useState<RouteProvenance | null>(null);
 
   const navService = useRef(new NavigationService()).current;
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -251,7 +275,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
 
   // Refs สำหรับเก็บตำแหน่งล่าสุดเพื่อหลีกเลี่ยง Stale Closure
   const agentRef = useRef<LatLng>({ lat: 0, lng: 0 });
-  const targetRef = useRef<LatLng>({ lat: 0, lng: 0 });
+  const targetRef = useRef<TargetReference>({ lat: 0, lng: 0, targetSampleId: null });
 
   useEffect(() => {
     routeVersionRef.current = routeVersion;
@@ -273,7 +297,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
     });
   }, []);
 
-  const updatePositions = useCallback((agent: LatLng, target: LatLng) => {
+  const updatePositions = useCallback((agent: LatLng, target: TargetReference) => {
     agentRef.current = agent;
     targetRef.current = target;
   }, []);
@@ -298,6 +322,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
     setDistance(0);
     setCorridorNodeCount(0);
     setEndpointDiagnostics(null);
+    setRouteCandidateProvenance(null);
     localStorage.removeItem(STORAGE_KEY);
   }, []);
 
@@ -312,6 +337,14 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
         }
 
         const data: NavigationSessionData = JSON.parse(stored);
+        data.targetPos = {
+          lat: data.targetPos.lat,
+          lng: data.targetPos.lng,
+          targetSampleId:
+            typeof data.targetPos.targetSampleId === 'string'
+              ? data.targetPos.targetSampleId
+              : null,
+        };
         const ageMs = Date.now() - data.timestamp;
 
         const discardRestoredSession = (reason: string, extra?: Record<string, unknown>) => {
@@ -377,11 +410,13 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
 
         // เรียก /update เพื่อดึง path ล่าสุด
         // หมายเหตุ: ตรงนี้ถ้า res.ok ไม่ผ่าน หรือเป็น 404 จะ return { sessionExpired: true }
+        const routeProvenance = createRouteProvenance(data.targetPos, 'restore');
         const updateData = await navService.update(
           data.sessionId,
           gpsCheck.position,
           data.targetPos,
           controller.signal,
+          routeProvenance,
         );
 
         if (controller.signal.aborted || isInitializingRef.current) {
@@ -409,6 +444,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
           agentRef.current = gpsCheck.position;
           targetRef.current = data.targetPos;
           setPath(restoredPath);
+          setRouteCandidateProvenance(updateData.routeProvenance ?? null);
           setManeuverRoute(createManeuverRouteSnapshot(restoredPath, updateData.maneuvers));
           incrementRouteVersion();
           incrementRouteSourceKey();
@@ -475,7 +511,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
   // เริ่มนำทาง (เรียก /init)
   const start = useCallback(async (
     agent: LatLng,
-    target: LatLng,
+    target: TargetReference,
     mode: NavigationMode = 'hybrid',
     gpsAgeMs: number | null = null,
     announceFreshStart = true,
@@ -500,7 +536,8 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
     setStatus('loading');
     setRouteUxState('initializing');
     try {
-      const data = await navService.init(agent, target, mode);
+      const routeProvenance = createRouteProvenance(target, 'init');
+      const data = await navService.init(agent, target, mode, routeProvenance);
 
       if ((data as any).error) {
         if ((data as any).rateLimit) {
@@ -553,6 +590,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
 
       setSessionId(initData.sessionId);
       setPath(initData.path);
+      setRouteCandidateProvenance(initData.routeProvenance ?? null);
       setManeuverRoute(createManeuverRouteSnapshot(initData.path, initData.maneuvers));
       incrementRouteVersion();
       incrementRouteSourceKey();
@@ -605,12 +643,14 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
 
       const agentPos = agentRef.current;
       const targetPos = targetRef.current;
+      const routeProvenance = createRouteProvenance(targetPos, 'incremental');
       try {
         const data = await navService.update(
           sessionId,
           agentPos,
           targetPos,
           controller.signal,
+          routeProvenance,
         );
         const durationMs = Date.now() - startedAt;
 
@@ -718,6 +758,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
         if (prevFull === null) {
           // Branch 1: First polling response for this session → always apply
           setPath(incomingPath);
+          setRouteCandidateProvenance(updateData.routeProvenance ?? null);
           incrementRouteVersion();
           incrementRouteSourceKey();
           lastAppliedFullSigRef.current = incomingFull;
@@ -728,6 +769,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
           // Must come BEFORE duplicate check: a refetch could return same coords as
           // the previous path yet still require a Source remount (new tile data, etc.).
           setPath(incomingPath);
+          setRouteCandidateProvenance(updateData.routeProvenance ?? null);
           incrementRouteVersion();
           incrementRouteSourceKey();
           lastAppliedFullSigRef.current = incomingFull;
@@ -742,6 +784,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
           //   tail changed   → MT-D* replanned mid-route geometry → increment routeVersion to force Source update
           const tailChanged = prevTail !== null && incomingTail !== prevTail;
           setPath(incomingPath);
+          setRouteCandidateProvenance(updateData.routeProvenance ?? null);
           lastAppliedFullSigRef.current = incomingFull;
           lastAppliedTailSigRef.current = incomingTail;
           // prevBody stays the same — endpoint is unchanged
@@ -754,6 +797,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
           // Branch 5: Route body changed without Mapbox API call (MT-D* replanned on its own)
           // Source key NOT incremented — setData on existing Source is sufficient
           setPath(incomingPath);
+          setRouteCandidateProvenance(updateData.routeProvenance ?? null);
           incrementRouteVersion();
           lastAppliedFullSigRef.current = incomingFull;
           lastAppliedBodySigRef.current = incomingBody;
@@ -812,6 +856,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
       endpointDiagnostics,
       restoreChecked,
       freshStartSequence,
+      routeCandidateProvenance,
     }}>
       {children}
     </NavigationContext.Provider>
