@@ -56,6 +56,14 @@ function CustomCompass({ bearing, onTap, size = 55 }: CustomCompassProps) {
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 const defaultCenter = { lat: 16.7422, lng: 100.1936 };
 const GPS_FRESHNESS_MAX_AGE_MS = 15_000;
+const RESEARCH_LOCATION_ENTRY_ENABLED =
+    process.env.NEXT_PUBLIC_RESEARCH_LOCATION_ENTRY_ENABLED === 'true';
+
+const parsePositiveSafeIntegerQuery = (value: string | string[] | undefined): number | null => {
+    if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+};
 
 type MapCoordinate = {
     lat: number;
@@ -125,6 +133,15 @@ const Location = () => {
     const { isLoaded } = useGoogleMaps(); // legacy Google Maps script-loaded flag — still used by the auth effect below, not used to gate render this phase
     const mapRef = useRef<MapRef>(null); // Overview/Mapbox map ref
 
+    const researchUsersId = parsePositiveSafeIntegerQuery(router.query.users_id);
+    const researchTakecareId = parsePositiveSafeIntegerQuery(router.query.takecare_id);
+    const isResearchEntryRequested =
+        RESEARCH_LOCATION_ENTRY_ENABLED && !router.query.auToken;
+    const isResearchEntry =
+        isResearchEntryRequested &&
+        researchUsersId !== null &&
+        researchTakecareId !== null;
+
     // ════════════════════════════════════════════════════════════════════
     // AFE STATE/LOGIC — auth, Safe Zone, patient polling, GPS watcher. This is
     // the single source of truth for real data (patientPos, myPos/
@@ -168,32 +185,41 @@ const Location = () => {
 
     // --- Helpers ---
 
-    const onGetLocation = async (safezoneData: any, takecareData: any, userData: any) => {
+    const onGetLocation = useCallback(async (safezoneData: any, takecareData: any, userData: any, researchEntry = false) => {
         try {
-            const resLocation = await axios.get(`/api/location/getLocation?takecare_id=${takecareData.takecare_id}&users_id=${userData.users_id}&safezone_id=${safezoneData.safezone_id}&location_id=${router.query.idlocation}`);
+            const locationUrl = researchEntry
+                ? `/api/navigate/target-location?users_id=${userData.users_id}&takecare_id=${takecareData.takecare_id}`
+                : `/api/location/getLocation?takecare_id=${takecareData.takecare_id}&users_id=${userData.users_id}&safezone_id=${safezoneData.safezone_id}&location_id=${router.query.idlocation}`;
+            const resLocation = await axios.get(locationUrl);
             if (resLocation.data?.data) {
                 const data = resLocation.data?.data;
                 setPatientPos({
-                    lat: Number(data.locat_latitude),
-                    lng: Number(data.locat_longitude),
+                    lat: Number(researchEntry ? data.lat : data.locat_latitude),
+                    lng: Number(researchEntry ? data.lng : data.locat_longitude),
                 });
-            } else {
+            } else if (!researchEntry) {
                 // Fallback to Safezone center if no location
                 setPatientPos({
                     lat: Number(safezoneData.safez_latitude),
                     lng: Number(safezoneData.safez_longitude),
                 });
+            } else {
+                setPatientPos({ lat: 0, lng: 0 });
             }
             setLoading(false);
         } catch (error) {
             console.error("Location error:", error);
+            if (researchEntry) setPatientPos({ lat: 0, lng: 0 });
             setLoading(false);
         }
-    }
+    }, [router.query.idlocation]);
 
-    const onGetSafezone = async (idSafezone: string, takecareData: any, userData: any) => {
+    const onGetSafezone = useCallback(async (idSafezone: string, takecareData: any, userData: any, researchEntry = false) => {
         try {
-            const resSafezone = await axios.get(`/api/setting/getSafezone?takecare_id=${takecareData.takecare_id}&users_id=${userData.users_id}&id=${idSafezone}`);
+            const safezoneUrl = researchEntry
+                ? `/api/setting/getSafezone?takecare_id=${takecareData.takecare_id}&users_id=${userData.users_id}`
+                : `/api/setting/getSafezone?takecare_id=${takecareData.takecare_id}&users_id=${userData.users_id}&id=${idSafezone}`;
+            const resSafezone = await axios.get(safezoneUrl);
             if (resSafezone.data?.data) {
                 const data = resSafezone.data?.data;
                 setSafezonePos({
@@ -204,13 +230,13 @@ const Location = () => {
                 setRange2(data.safez_radiuslv2);
 
                 // Also get initial location to be sure
-                onGetLocation(data, takecareData, userData);
+                onGetLocation(data, takecareData, userData, researchEntry);
             }
         } catch (error) {
             console.error("Safezone error:", error);
             setLoading(false);
         }
-    }
+    }, [onGetLocation]);
 
     const alertModal = () => {
         setAlert({ show: true, message: 'ระบบไม่สามารถดึงข้อมูลของท่านได้ กรุณาลองใหม่อีกครั้ง' });
@@ -242,7 +268,7 @@ const Location = () => {
             console.error("Auth error:", error);
             alertModal();
         }
-    }, [router.query.idsafezone]); // Add dep
+    }, [router.query.idsafezone, onGetSafezone]); // Add dep
 
     // --- Effects ---
 
@@ -313,14 +339,16 @@ const Location = () => {
 
         const fetchLocation = async () => {
             try {
-                const url = `/api/location/getLocation?takecare_id=${dataUser.takecareData.takecare_id}&users_id=${dataUser.userData.users_id}`;
+                const url = isResearchEntry
+                    ? `/api/navigate/target-location?users_id=${dataUser.userData.users_id}&takecare_id=${dataUser.takecareData.takecare_id}`
+                    : `/api/location/getLocation?takecare_id=${dataUser.takecareData.takecare_id}&users_id=${dataUser.userData.users_id}`;
                 const resLocation = await axios.get(url);
 
                 if (resLocation.data?.data) {
                     const data = resLocation.data.data;
                     setPatientPos({
-                        lat: Number(data.locat_latitude),
-                        lng: Number(data.locat_longitude),
+                        lat: Number(isResearchEntry ? data.lat : data.locat_latitude),
+                        lng: Number(isResearchEntry ? data.lng : data.locat_longitude),
                     });
                 }
             } catch (err) {
@@ -362,7 +390,7 @@ const Location = () => {
 
         const interval = setInterval(fetchLocation, intervalDuration);
         return () => clearInterval(interval);
-    }, [dataUser, safezonePos, patientPos, range1]);
+    }, [dataUser, safezonePos, patientPos, range1, isResearchEntry]);
 
     // 5. Auth & Initial Data Load — legacy, still runs in the background
     useEffect(() => {
@@ -371,11 +399,31 @@ const Location = () => {
         const auToken = router.query.auToken;
         if (auToken && isLoaded) {
             onGetUserData(auToken as string);
+        } else if (!auToken && isResearchEntry) {
+            const userData = { users_id: researchUsersId };
+            const takecareData = { takecare_id: researchTakecareId };
+            setDataUser({ isLogin: true, userData, takecareData });
+            onGetSafezone('', takecareData, userData, true);
+        } else if (!auToken && isResearchEntryRequested) {
+            setDataUser({ isLogin: false, userData: null, takecareData: null });
+            setPatientPos({ lat: 0, lng: 0 });
+            setLoading(false);
+            setAlert({ show: true, message: "ไม่พบข้อมูลการเข้าสู่ระบบ (auToken Missing)" });
         } else if (isLoaded && !auToken) {
             setLoading(false);
             setAlert({ show: true, message: "ไม่พบข้อมูลการเข้าสู่ระบบ (auToken Missing)" });
         }
-    }, [router.query.auToken, isLoaded, router.isReady, onGetUserData]);
+    }, [
+        router.query.auToken,
+        isLoaded,
+        router.isReady,
+        isResearchEntryRequested,
+        isResearchEntry,
+        researchUsersId,
+        researchTakecareId,
+        onGetUserData,
+        onGetSafezone,
+    ]);
 
     const handleEmergencyNav = () => {
         if (
