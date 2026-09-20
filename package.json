@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "vercel-build": "next build",
-    "test:route-display-clip": "node scripts/test-route-display-clip-model.mjs && node scripts/verify-route-display-clip-fix.mjs"
+    "test:route-display-clip": "node scripts/test-route-display-clip-model.mjs && node scripts/verify-route-display-clip-fix.mjs",
+    "test:research-m4-m5": "node scripts/verify-m4-m5-instrumentation.mjs"
   },
   "dependencies": {
     "@fortawesome/fontawesome-free": "^6.4.0",

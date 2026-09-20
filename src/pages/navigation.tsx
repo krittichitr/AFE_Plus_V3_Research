@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback, useSyncExternalStore } from "react";
 import Map, { Marker, Source, Layer, MapRef } from "react-map-gl/mapbox";
+import type { LngLatLike, Marker as MapboxMarkerInstance } from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { ArrowUp, Compass, CornerUpLeft, CornerUpRight, MoveUpLeft, MoveUpRight, Undo2, Volume2, VolumeX, Navigation as NavIcon } from "lucide-react";
 import { useRouter } from "next/router";
@@ -13,6 +14,8 @@ import type { TargetReference } from "@/hooks/useNavigation";
 import ResearchLogPanel from "@/components/research/ResearchLogPanel";
 import {
     appendResearchProvenanceEvent,
+    appendResearchObservationAt,
+    getRecordingResearchRunId,
     getResearchLoggerSnapshot,
     subscribeResearchLogger,
 } from "@/lib/research/provenanceEvents";
@@ -73,6 +76,23 @@ type NavigationQueryResult =
     };
 
 const NAVIGATION_QUERY_ERROR = 'ข้อมูลผู้ใช้งานสำหรับการนำทางไม่ถูกต้อง';
+
+type ResearchInstrumentedMarker = MapboxMarkerInstance & {
+    __afeResearchSetLngLatInstrumented?: boolean;
+};
+
+function researchLngLat(lngLat: LngLatLike): { lat: number | null; lng: number | null } {
+    if (Array.isArray(lngLat)) {
+        return { lng: Number(lngLat[0]), lat: Number(lngLat[1]) };
+    }
+    if ('lng' in lngLat && 'lat' in lngLat) {
+        return { lng: Number(lngLat.lng), lat: Number(lngLat.lat) };
+    }
+    if ('lon' in lngLat && 'lat' in lngLat) {
+        return { lng: Number(lngLat.lon), lat: Number(lngLat.lat) };
+    }
+    return { lat: null, lng: null };
+}
 
 function parseNavigationQuery(
     query: Record<string, string | string[] | undefined>,
@@ -825,6 +845,12 @@ function NavigationScreen() {
     const visualAnimFrameRef     = useRef<number | null>(null);
     const lastVisualFrameTimeRef = useRef<number>(0);
     const isVisualLoopRunningRef = useRef<boolean>(false);
+    const latestLocationSampleIdRef = useRef<number | null>(null);
+    const latestLocationSampleRunIdRef = useRef<string | null>(null);
+    const motionObservationSeqRef = useRef<number>(0);
+    const latestMotionFrameIdRef = useRef<number | null>(null);
+    const latestMotionFrameRunIdRef = useRef<string | null>(null);
+    const markerCommandSeqRef = useRef<number>(0);
     const [routeTailAnchor, setRouteTailAnchor] = useState<RouteTailAnchor | null>(null);
     const routeTailAnchorRef = useRef<RouteTailAnchor | null>(null);
     const [stableRouteSourcePath, setStableRouteSourcePath] = useState<LatLngPoint[]>([]);
@@ -1507,6 +1533,18 @@ function NavigationScreen() {
     }, [stableRouteSourcePath, routeVersion]);
 
     useEffect(() => {
+        appendResearchObservationAt({
+            event: 'route_generation_changed',
+            route_version: routeVersion,
+            route_source_key: routeSourceKey,
+            motion_route_version: motionRouteVersionRef.current,
+            authoritative_point_count: path.length,
+            displayed_point_count: stableRouteSourcePathRef.current.length,
+            navigation_status: status,
+        }, performance.now());
+    }, [path.length, routeSourceKey, routeVersion, status]);
+
+    useEffect(() => {
         const btRef  = bearingEaseTimeoutRef;
         const mtRef  = modeTransitionTimeoutRef;
         return () => {
@@ -1517,6 +1555,28 @@ function NavigationScreen() {
 
     // Keep cameraModeRef in sync with cameraMode state so the rAF loop can read it without stale closures
     useEffect(() => { cameraModeRef.current = cameraMode; }, [cameraMode]);
+
+    useEffect(() => {
+        const recordLifecycle = (event: string, persisted: boolean | null = null) => {
+            const capturedPerformanceMs = performance.now();
+            appendResearchObservationAt({
+                event,
+                visibility_state: document.visibilityState,
+                persisted,
+            }, capturedPerformanceMs);
+        };
+        const onVisibilityChange = () => recordLifecycle('lifecycle_visibility_changed');
+        const onPageHide = (event: PageTransitionEvent) => recordLifecycle('lifecycle_page_hidden', event.persisted);
+        const onPageShow = (event: PageTransitionEvent) => recordLifecycle('lifecycle_page_shown', event.persisted);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        window.addEventListener('pagehide', onPageHide);
+        window.addEventListener('pageshow', onPageShow);
+        return () => {
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            window.removeEventListener('pagehide', onPageHide);
+            window.removeEventListener('pageshow', onPageShow);
+        };
+    }, []);
 
     // ── Continuous visual rendering loop (Phase 7F-1c-fix) ────────────────────
     // Runs every rAF frame for the full navigation session — independent of GPS
@@ -2266,6 +2326,48 @@ function NavigationScreen() {
                 }
             }
 
+            const motionFrameId = ++motionObservationSeqRef.current;
+            const recordingRunId = getRecordingResearchRunId();
+            latestMotionFrameIdRef.current = motionFrameId;
+            latestMotionFrameRunIdRef.current = recordingRunId;
+            const observedMotion = motionStateRef.current;
+            appendResearchObservationAt({
+                event: 'agent_motion_computed',
+                motion_frame_id: motionFrameId,
+                location_sample_id: latestLocationSampleRunIdRef.current === recordingRunId
+                    ? latestLocationSampleIdRef.current
+                    : null,
+                raw_frame_dt_ms: rawDt,
+                controller_dt_ms: dtMs,
+                raw_gps_lat: observedMotion.rawGpsPosition.lat,
+                raw_gps_lng: observedMotion.rawGpsPosition.lng,
+                gps_age_ms: observedMotion.gpsAge,
+                computed_lat: observedMotion.visualPosition.lat,
+                computed_lng: observedMotion.visualPosition.lng,
+                target_lat: observedMotion.integratorTargetPosition.lat,
+                target_lng: observedMotion.integratorTargetPosition.lng,
+                target_distance_m: observedMotion.integratorTargetDistanceM,
+                velocity_mps: observedMotion.integratorVelocityMps,
+                desired_speed_mps: observedMotion.integratorDesiredSpeedMps,
+                controller_mode: observedMotion.integratorMode,
+                controller_settled: observedMotion.integratorIsSettled,
+                route_progress_m: observedMotion.integratorRouteProgressM,
+                target_progress_m: observedMotion.integratorTargetProgressM,
+                route_progress_valid: observedMotion.integratorRouteProgressValid,
+                route_bearing_source: observedMotion.integratorRouteBearingSource,
+                projection_valid: observedMotion.isProjected,
+                projection_distance_m: observedMotion.projectionDistanceM,
+                route_version: routeVersionRef.current,
+                route_source_key: routeSourceKeyRef.current,
+                motion_route_version: motionRouteVersionRef.current,
+                motion_route_point_count: getMotionRoute().length,
+                marker_bearing_deg: observedMotion.visualMarkerBearing,
+                camera_following: isCameraFollowingRef.current,
+                camera_mode: cameraModeRef.current,
+                user_camera_override: userCameraOverrideRef.current,
+                visibility_state: document.visibilityState,
+            }, performance.now());
+
             visualAnimFrameRef.current = requestAnimationFrame(runFrame);
         };
 
@@ -2539,6 +2641,13 @@ function NavigationScreen() {
             return;
         }
 
+        appendResearchObservationAt({
+            event: 'camera_context_changed',
+            reason: `user_${reason}`,
+            camera_following_before: isCameraFollowingRef.current,
+            camera_mode: cameraModeRef.current,
+            user_camera_override_after: true,
+        }, performance.now());
         applyUserCameraOverride();
     };
 
@@ -3205,6 +3314,32 @@ function NavigationScreen() {
         if (!navigator.geolocation) return;
         const watchId = navigator.geolocation.watchPosition(
             (pos) => {
+                const receiptPerformanceMs = performance.now();
+                const coordinateValid = Number.isFinite(pos.coords.latitude)
+                    && Number.isFinite(pos.coords.longitude)
+                    && pos.coords.latitude >= -90 && pos.coords.latitude <= 90
+                    && pos.coords.longitude >= -180 && pos.coords.longitude <= 180;
+                const locationSampleId = appendResearchObservationAt({
+                    event: 'raw_location_received',
+                    source: 'navigator.geolocation.watchPosition',
+                    subscription_id: 'primary_navigation_watch',
+                    gps_source_timestamp_ms: pos.timestamp,
+                    gps_source_timestamp_utc: Number.isFinite(pos.timestamp)
+                        ? new Date(pos.timestamp).toISOString()
+                        : null,
+                    latitude: pos.coords.latitude,
+                    longitude: pos.coords.longitude,
+                    accuracy_m: Number.isFinite(pos.coords.accuracy) ? pos.coords.accuracy : null,
+                    altitude_m: pos.coords.altitude,
+                    altitude_accuracy_m: pos.coords.altitudeAccuracy,
+                    speed_mps: pos.coords.speed,
+                    heading_deg: pos.coords.heading,
+                    coordinate_valid: coordinateValid,
+                    validity_state: coordinateValid ? 'valid' : 'invalid_coordinate',
+                    visibility_state: document.visibilityState,
+                }, receiptPerformanceMs, 'location_sample_id');
+                latestLocationSampleIdRef.current = locationSampleId;
+                latestLocationSampleRunIdRef.current = getRecordingResearchRunId();
                 const newPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
                 setCurrentPosition(newPos);
                 setGpsError(false);
@@ -3369,16 +3504,47 @@ function NavigationScreen() {
                 setDisplayBearing(prevHeadingRef.current);
             },
             (err) => {
+                const receiptPerformanceMs = performance.now();
+                appendResearchObservationAt({
+                    event: 'raw_location_error',
+                    source: 'navigator.geolocation.watchPosition',
+                    subscription_id: 'primary_navigation_watch',
+                    error_code: err.code,
+                    error_message: err.message,
+                    validity_state: 'error',
+                    visibility_state: document.visibilityState,
+                }, receiptPerformanceMs);
                 setGpsError(true);
                 console.error("GPS Error:", err.message);
             },
             { enableHighAccuracy: true, timeout: 15000, maximumAge: 1000 }
         );
-        return () => navigator.geolocation.clearWatch(watchId);
+        appendResearchProvenanceEvent({
+            event: 'location_subscription_state',
+            subscription_id: 'primary_navigation_watch',
+            state: 'started',
+            settings: { enableHighAccuracy: true, timeout: 15000, maximumAge: 1000 },
+        });
+        return () => {
+            appendResearchProvenanceEvent({
+                event: 'location_subscription_state',
+                subscription_id: 'primary_navigation_watch',
+                state: 'stopped',
+            });
+            navigator.geolocation.clearWatch(watchId);
+        };
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleRecenter = () => {
         if (!mapRef.current) return;
+
+        appendResearchObservationAt({
+            event: 'camera_context_changed',
+            reason: 'recenter_requested',
+            camera_following_before: isCameraFollowingRef.current,
+            camera_mode: cameraModeRef.current,
+            user_camera_override_before: userCameraOverrideRef.current,
+        }, performance.now());
 
         const isActiveNavigation = hasStartedMovingRef.current && cameraModeRef.current === 'navigation_follow';
         const agentPos = visualAgentPositionRef.current; // use visual position for smooth transition
@@ -3470,6 +3636,79 @@ function NavigationScreen() {
             ? normalizeBearing(visualMarkerBearing - mapHeading)
             : normalizeBearing(visualMarkerBearing)
     ), [isCameraFollowing, mapHeading, visualMarkerBearing]);
+
+    const observeAgentMarker = useCallback((marker: MapboxMarkerInstance | null) => {
+        const observedAt = performance.now();
+        if (marker === null) {
+            appendResearchObservationAt({
+                event: 'agent_marker_lifecycle',
+                state: 'detached',
+                visible_render_confirmed: false,
+            }, observedAt);
+            return;
+        }
+
+        const instrumented = marker as ResearchInstrumentedMarker;
+        if (!instrumented.__afeResearchSetLngLatInstrumented) {
+            const originalSetLngLat = marker.setLngLat;
+            instrumented.setLngLat = ((lngLat: LngLatLike) => {
+                const dispatchAt = performance.now();
+                const commandId = ++markerCommandSeqRef.current;
+                const coordinate = researchLngLat(lngLat);
+                const recordingRunId = getRecordingResearchRunId();
+                appendResearchObservationAt({
+                    event: 'agent_marker_command_dispatched',
+                    marker_command_id: commandId,
+                    motion_frame_id: latestMotionFrameRunIdRef.current === recordingRunId
+                        ? latestMotionFrameIdRef.current
+                        : null,
+                    location_sample_id: latestLocationSampleRunIdRef.current === recordingRunId
+                        ? latestLocationSampleIdRef.current
+                        : null,
+                    command_lat: coordinate.lat,
+                    command_lng: coordinate.lng,
+                    command_operation: 'setLngLat',
+                    route_version: routeVersionRef.current,
+                    route_source_key: routeSourceKeyRef.current,
+                    motion_route_version: motionRouteVersionRef.current,
+                    camera_following: isCameraFollowingRef.current,
+                    camera_mode: cameraModeRef.current,
+                    visible_render_confirmed: false,
+                }, dispatchAt);
+                try {
+                    const result = originalSetLngLat.call(instrumented, lngLat);
+                    appendResearchObservationAt({
+                        event: 'agent_marker_command_completed',
+                        marker_command_id: commandId,
+                        motion_frame_id: latestMotionFrameIdRef.current,
+                        completion_kind: 'synchronous_js_return',
+                        visible_render_confirmed: false,
+                    }, performance.now());
+                    return result;
+                } catch (error) {
+                    appendResearchObservationAt({
+                        event: 'agent_marker_command_error',
+                        marker_command_id: commandId,
+                        motion_frame_id: latestMotionFrameIdRef.current,
+                        error_type: error instanceof Error ? error.name : typeof error,
+                        error_message: error instanceof Error ? error.message : String(error),
+                        visible_render_confirmed: false,
+                    }, performance.now());
+                    throw error;
+                }
+            }) as MapboxMarkerInstance['setLngLat'];
+            instrumented.__afeResearchSetLngLatInstrumented = true;
+        }
+        const coordinate = marker.getLngLat();
+        appendResearchObservationAt({
+            event: 'agent_marker_lifecycle',
+            state: 'attached',
+            command_lat: coordinate.lat,
+            command_lng: coordinate.lng,
+            initial_set_lng_lat_observed: false,
+            visible_render_confirmed: false,
+        }, observedAt);
+    }, []);
 
     // Production entry gates.
     // Do not expose invalid sentinel coordinates while identity/GPS/target
@@ -3569,6 +3808,7 @@ function NavigationScreen() {
                 >
                     {/* หมุดตัวเรา — ใช้ visualAgentPosition (smooth lerp toward snapped route) */}
                     <Marker
+                        ref={observeAgentMarker}
                         longitude={visualAgentPosition.lng}
                         latitude={visualAgentPosition.lat}
                         anchor="center"
