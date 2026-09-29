@@ -74,7 +74,7 @@ export async function fetchBubbleRays(
   const anchors = generateAnchorPoints(targetPos, radiusM);
 
   const settled = await Promise.allSettled(
-    anchors.map(({ pos }) => fetchDirectionsBubble(targetPos, pos)),
+    anchors.map(({ pos, direction }) => fetchDirectionsBubble(targetPos, pos, direction)),
   );
 
   const responses: MapboxDirectionsResponse[] = [];

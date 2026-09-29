@@ -11,6 +11,8 @@ export interface RouteProvenance {
   target_ref_lng: number;
   research_run_id?: string;
   research_request_phase?: 'init' | 'restore' | 'incremental';
+  m2_research_mode?: true;
+  m2_run_token?: string;
 }
 
 export type BackendResearchEvent = {

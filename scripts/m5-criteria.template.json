@@ -1,0 +1,19 @@
+{
+  "schema_version": "m5-criteria-v1",
+  "protocol_version": "M5-PROTOCOL-V1",
+  "min_stall_duration_ms": null,
+  "stall_visual_tolerance_rule": null,
+  "max_catchup_delay_ms": null,
+  "catchup_rule": null,
+  "episode_merge_gap_ms": null,
+  "max_sync_uncertainty_ms": null,
+  "max_sync_drift_ppm": null,
+  "min_verified_walking_duration_ms": null,
+  "min_video_coverage_ratio": null,
+  "camera_confound_rule": null,
+  "unverifiable_segment_rule": null,
+  "required_second_review_zero_fraction": null,
+  "annotation_confidence_rule": null,
+  "dropped_event_rule": null,
+  "lifecycle_interruption_rule": null
+}

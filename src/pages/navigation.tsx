@@ -12,6 +12,8 @@ import { AdaptivePollingService } from "@/services/pollingService";
 import { NavigationProvider, useNavigation } from "@/hooks/useNavigation";
 import type { TargetReference } from "@/hooks/useNavigation";
 import ResearchLogPanel from "@/components/research/ResearchLogPanel";
+import { isExplicitM2ResearchMode } from "@/lib/research/m2Mode";
+import { finishM1FrontendAtActivation, holdM1FrontendCandidate } from "@/lib/research/m1Frontend";
 import {
     appendResearchProvenanceEvent,
     appendResearchObservationAt,
@@ -1009,14 +1011,16 @@ function NavigationScreen() {
             if (!routeCandidateProvenance) return;
             const routeActivationSeq = routeActivationSeqRef.current + 1;
             routeActivationSeqRef.current = routeActivationSeq;
-            appendResearchProvenanceEvent({
+            const activeRecorded = appendResearchProvenanceEvent({
                 event: 'route_active',
                 system_version: 'V3',
                 ...routeCandidateProvenance,
+                session_id: sessionId,
                 route_activation_seq: routeActivationSeq,
                 route_version: routeVersion,
                 route_signature: nextSignature,
             });
+            if (activeRecorded) finishM1FrontendAtActivation(routeCandidateProvenance, sessionId, routeVersion);
         };
         const applySourcePathLegacy = (reason: string) => {
             const nextPath = candidate.map((point) => ({ lat: point.lat, lng: point.lng }));
@@ -1234,6 +1238,7 @@ function NavigationScreen() {
 
         const holdBodyLock = () => {
             routeBodyLockActiveRef.current = true;
+            if (routeCandidateProvenance) holdM1FrontendCandidate(routeCandidateProvenance.route_update_id);
         };
 
 
@@ -3008,6 +3013,7 @@ function NavigationScreen() {
         if (!hasRealGpsPosition || !hasRealTargetPosition) return;
         // Research-only startup gate: run_start must exist before initial /init.
         if (researchLogger.status !== 'RECORDING') return;
+        if (isExplicitM2ResearchMode() && researchLogger.m2Status !== 'READY') return;
         if (sessionId || status !== 'idle') return;
         if (initInFlightRef.current) return;
 
@@ -3042,6 +3048,7 @@ function NavigationScreen() {
         hasRealGpsPosition,
         hasRealTargetPosition,
         researchLogger.status,
+        researchLogger.m2Status,
         restoreChecked,
         sessionId,
         start,

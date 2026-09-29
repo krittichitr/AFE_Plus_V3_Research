@@ -2,7 +2,8 @@ import type { Coordinate, MapboxDirectionsResponse } from '@/lib/navigation/type
 import { CircuitBreaker } from './circuit-breaker';
 import { createLogger, MapboxApiError } from './logger';
 import { env } from '@/config/navigation-env';
-import { recordMapboxHttpAttempt } from '@/lib/research/backendResearch';
+import { acknowledgeM2MapboxFetch, trackM2JournalWrite } from '@/lib/research/backendResearch';
+import { journalM2Outcome } from '@/lib/research/m2Journal';
 
 const log = createLogger('mapbox-client');
 
@@ -55,22 +56,39 @@ export async function fetchDirections(
 
   const response = await breaker.execute(async () => {
     // AbortSignal.timeout สำหรับ hard timeout 5s
-    recordMapboxHttpAttempt(`profile/corridor:${profile}`);
-    const res = await fetch(url.toString(), {
-      method: 'GET',
-      signal: AbortSignal.timeout(5_000),
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new MapboxApiError(
-        `Mapbox ${res.status}: ${body.slice(0, 200)}`,
-        res.status >= 500 ? 502 : 400,
-      );
+    const attempt = await acknowledgeM2MapboxFetch(`profile/corridor:${profile}`, profile === 'walking' ? 'corridor_walking' : 'corridor_driving');
+    let httpStatus: number | null = null;
+    let success = false;
+    let failureReason: string | null = null;
+    try {
+      const res = await fetch(url.toString(), {
+        method: 'GET',
+        signal: AbortSignal.timeout(5_000),
+        headers: { 'Content-Type': 'application/json' },
+      });
+      httpStatus = res.status;
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new MapboxApiError(
+          `Mapbox ${res.status}: ${body.slice(0, 200)}`,
+          res.status >= 500 ? 502 : 400,
+        );
+      }
+      const parsed = await res.json() as MapboxDirectionsResponse;
+      success = parsed.code === 'Ok' && Array.isArray(parsed.routes) && parsed.routes.length > 0;
+      if (!success) failureReason = 'mapbox_no_usable_route';
+      return parsed;
+    } catch (error) {
+      failureReason = error instanceof Error ? error.name : 'unknown_error';
+      throw error;
+    } finally {
+      if (attempt) {
+        trackM2JournalWrite(journalM2Outcome(attempt.research_run_id, {
+          event: 'm2_mapbox_outcome', mapbox_attempt_id: attempt.mapbox_attempt_id,
+          success, http_status: httpStatus, failure_reason: failureReason,
+        }));
+      }
     }
-
-    return res.json() as Promise<MapboxDirectionsResponse>;
   });
 
   if (response.code !== 'Ok' || response.routes.length === 0) {
@@ -150,6 +168,7 @@ export function getMapboxCircuitState() {
 export async function fetchDirectionsBubble(
   origin: Coordinate,
   destination: Coordinate,
+  rayDirection: string | null = null,
 ): Promise<MapboxDirectionsResponse> {
   const token = env.MAPBOX_ACCESS_TOKEN;
   const coords = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
@@ -161,16 +180,35 @@ export async function fetchDirectionsBubble(
   url.searchParams.set('annotations', 'distance,duration');
 
   const response = await bubbleBreaker.execute(async () => {
-    recordMapboxHttpAttempt('target_ray/bubble');
-    const res = await fetch(url.toString(), {
-      method: 'GET',
-      signal: AbortSignal.timeout(4_000),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new MapboxApiError(`Bubble Mapbox ${res.status}: ${body.slice(0, 200)}`, res.status >= 500 ? 502 : 400);
+    const attempt = await acknowledgeM2MapboxFetch('target_ray/bubble', 'target_ray', rayDirection);
+    let httpStatus: number | null = null;
+    let success = false;
+    let failureReason: string | null = null;
+    try {
+      const res = await fetch(url.toString(), {
+        method: 'GET',
+        signal: AbortSignal.timeout(4_000),
+      });
+      httpStatus = res.status;
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new MapboxApiError(`Bubble Mapbox ${res.status}: ${body.slice(0, 200)}`, res.status >= 500 ? 502 : 400);
+      }
+      const parsed = await res.json() as MapboxDirectionsResponse;
+      success = parsed.code === 'Ok' && Array.isArray(parsed.routes) && parsed.routes.length > 0;
+      if (!success) failureReason = 'mapbox_no_usable_route';
+      return parsed;
+    } catch (error) {
+      failureReason = error instanceof Error ? error.name : 'unknown_error';
+      throw error;
+    } finally {
+      if (attempt) {
+        trackM2JournalWrite(journalM2Outcome(attempt.research_run_id, {
+          event: 'm2_mapbox_outcome', mapbox_attempt_id: attempt.mapbox_attempt_id,
+          success, http_status: httpStatus, failure_reason: failureReason,
+        }));
+      }
     }
-    return res.json() as Promise<MapboxDirectionsResponse>;
   });
 
   if (response.code !== 'Ok' || response.routes.length === 0) {

@@ -1,0 +1,10 @@
+{
+  "schema_version": "m3-manifest-v1",
+  "protocol_version": "M3-PROTOCOL-V1",
+  "research_run_id": "RUN-REPLACE-ME",
+  "system": "AFE-Plus V.2",
+  "navigation_session_id": "REPLACE-WITH-route_active.session_id",
+  "sender_session_id": "REPLACE-WITH-sender_session_id",
+  "navigation_log_file": "REPLACE-WITH-path/to/navigation-run.jsonl",
+  "sender_trace_file": "REPLACE-WITH-path/to/target-trace-<sender_session_id>.jsonl"
+}

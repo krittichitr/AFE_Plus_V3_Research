@@ -3116,7 +3116,11 @@ async function handleRequest(req: NextApiRequest, res: NextApiResponse): Promise
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
   const context = researchContextFromRequestBody(req.body, 'update');
-  return withBackendResearchContext(context, () => handleRequest(req, res));
+  if (req.body?.routeProvenance?.m2_research_mode === true && !context) {
+    res.status(400).json({ error: 'M2_RESEARCH_PROVENANCE_INVALID' });
+    return;
+  }
+  return withBackendResearchContext(context, () => handleRequest(req, res), res);
 }
 
 // ─── Phase 7F-3B: truth context enriched into every stored metric ─────────────

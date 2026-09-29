@@ -1,0 +1,15 @@
+{
+  "schema_version": "m5-annotation-v1",
+  "protocol_version": "M5-PROTOCOL-V1",
+  "research_run_id": "REPLACE_WITH_EXPORTED_RUN_ID",
+  "platform": "web",
+  "video_file": "REPLACE_WITH_VIDEO_FILE_PATH",
+  "walking_window_id": "REPLACE_WITH_EXPORTED_WINDOW_ID",
+  "video_review_complete": false,
+  "primary_reviewer_id": "REPLACE_WITH_REVIEWER_ID",
+  "sync_points": [],
+  "segments": [],
+  "episodes": [],
+  "no_event_regions": [],
+  "reviews": []
+}

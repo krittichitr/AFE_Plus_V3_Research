@@ -1,0 +1,7 @@
+{
+  "schema_version": "m3-criteria-v1",
+  "max_rtt_ms": null,
+  "max_clock_uncertainty_ms": null,
+  "max_clock_drift_ms": null,
+  "max_route_reference_match_distance_m": null
+}

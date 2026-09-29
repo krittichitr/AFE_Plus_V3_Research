@@ -16,9 +16,17 @@ import { probeResearchClockSync } from '@/lib/research/clockSync';
 
 type GpsStatus = 'Waiting' | 'Ready' | 'Error';
 
+type SenderStartTraceRecord = {
+  event: 'sender_start' | 'sender_stop';
+  sender_session_id: string;
+  research_run_id: string | null;
+  wall_clock_utc: string;
+};
+
 type TargetSampleTraceRecord = {
   event: 'target_sample';
   sender_session_id: string;
+  research_run_id: string | null;
   target_sample_id: string;
   sequence: number;
   target_lat: number;
@@ -33,6 +41,7 @@ type TargetSampleTraceRecord = {
 type ClockSyncTraceRecord = {
   event: 'clock_sync';
   sender_session_id: string;
+  research_run_id: string | null;
   server_wall_clock_ms: number | null;
   client_send_wall_ms: number;
   client_receive_wall_ms: number;
@@ -42,7 +51,7 @@ type ClockSyncTraceRecord = {
   success: boolean;
 };
 
-type TargetTraceRecord = TargetSampleTraceRecord | ClockSyncTraceRecord;
+type TargetTraceRecord = SenderStartTraceRecord | TargetSampleTraceRecord | ClockSyncTraceRecord;
 
 const LOCATION_OPTIONS: PositionOptions = {
   enableHighAccuracy: true,
@@ -124,12 +133,16 @@ export default function TargetSenderPage() {
   const [failedSends, setFailedSends] = useState(0);
   const [traceRecordCount, setTraceRecordCount] = useState(0);
   const [lastError, setLastError] = useState<string | null>(null);
+  const [researchRunIdInput, setResearchRunIdInput] = useState('');
+  const [activeResearchRunId, setActiveResearchRunId] = useState<string | null>(null);
+  const [activeSenderSessionId, setActiveSenderSessionId] = useState<string | null>(null);
 
   const watchIdRef = useRef<number | null>(null);
   const activeRef = useRef(false);
   const sessionGenerationRef = useRef(0);
   const sequenceRef = useRef(0);
   const senderSessionIdRef = useRef<string | null>(null);
+  const researchRunIdRef = useRef<string | null>(null);
   const targetTraceRef = useRef<TargetTraceRecord[]>([]);
   const cumulativeDistanceRef = useRef(0);
   const startSampleRef = useRef<TargetGpsSample | null>(null);
@@ -153,6 +166,15 @@ export default function TargetSenderPage() {
   }, []);
 
   const stopSending = useCallback(() => {
+    if (activeRef.current && senderSessionIdRef.current) {
+      targetTraceRef.current.push(Object.freeze({
+        event: 'sender_stop',
+        sender_session_id: senderSessionIdRef.current,
+        research_run_id: researchRunIdRef.current,
+        wall_clock_utc: new Date().toISOString(),
+      }));
+      setTraceRecordCount(targetTraceRef.current.length);
+    }
     stopRuntime();
     setIsStarting(false);
     setIsSending(false);
@@ -165,6 +187,7 @@ export default function TargetSenderPage() {
       targetTraceRef.current.push(Object.freeze({
         event: 'clock_sync',
         sender_session_id: senderSessionId,
+        research_run_id: researchRunIdRef.current,
         ...result,
         wall_clock_utc: new Date().toISOString(),
       }));
@@ -217,6 +240,10 @@ export default function TargetSenderPage() {
     if (activeRef.current || isStarting) return;
     const senderSessionId = crypto.randomUUID();
     senderSessionIdRef.current = senderSessionId;
+    const researchRunId = researchRunIdInput.trim().slice(0, 200) || null;
+    researchRunIdRef.current = researchRunId;
+    setActiveResearchRunId(researchRunId);
+    setActiveSenderSessionId(senderSessionId);
     setLastError(null);
 
     if (!identity) {
@@ -254,6 +281,13 @@ export default function TargetSenderPage() {
       const sessionGeneration = sessionGenerationRef.current + 1;
       sessionGenerationRef.current = sessionGeneration;
       activeRef.current = true;
+      targetTraceRef.current.push(Object.freeze({
+        event: 'sender_start',
+        sender_session_id: senderSessionId,
+        research_run_id: researchRunId,
+        wall_clock_utc: new Date().toISOString(),
+      }));
+      setTraceRecordCount(targetTraceRef.current.length);
       recordSenderClockSync(senderSessionId);
 
       const watchId = navigator.geolocation.watchPosition(
@@ -284,6 +318,7 @@ export default function TargetSenderPage() {
           targetTraceRef.current.push(Object.freeze({
             event: 'target_sample',
             sender_session_id: sample.senderSessionId,
+            research_run_id: researchRunIdRef.current,
             target_sample_id: sample.targetSampleId,
             sequence: sample.sequence,
             target_lat: sample.latitude,
@@ -325,7 +360,7 @@ export default function TargetSenderPage() {
       }
       setIsStarting(false);
     }
-  }, [identity, isStarting, queueSend, recordSenderClockSync]);
+  }, [identity, isStarting, queueSend, recordSenderClockSync, researchRunIdInput]);
 
   const coordinateText = (value: number | null | undefined, digits: number): string =>
     typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—';
@@ -368,6 +403,24 @@ export default function TargetSenderPage() {
             </strong>
           </div>
         </div>
+
+        <section className="panel">
+          <h2>Run Linkage</h2>
+          <label htmlFor="research-run-id" className="field-label">Research Run ID</label>
+          <input
+            id="research-run-id"
+            type="text"
+            className="run-id-input"
+            value={researchRunIdInput}
+            onChange={(event) => setResearchRunIdInput(event.target.value)}
+            disabled={isSending || isStarting}
+            placeholder="ตรงกับ Run ID ของ navigation logger"
+          />
+          <dl className="data-list">
+            <div><dt>Active Run ID</dt><dd>{activeResearchRunId ?? '—'}</dd></div>
+            <div><dt>Sender Session ID</dt><dd>{activeSenderSessionId ?? '—'}</dd></div>
+          </dl>
+        </section>
 
         <section className="panel">
           <h2>Latest GPS</h2>
@@ -469,6 +522,19 @@ export default function TargetSenderPage() {
         .data-list div:last-child { border-bottom: 0; }
         dt { color: #60777d; font-size: 14px; }
         dd { margin: 0; color: #18343b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; }
+        .field-label { display: block; margin-bottom: 6px; color: #60777d; font-size: 13px; }
+        .run-id-input {
+          width: 100%;
+          min-height: 40px;
+          margin: 0 0 12px;
+          padding: 8px 10px;
+          border: 1px solid #dbe6e9;
+          border-radius: 10px;
+          font-size: 14px;
+          color: #18343b;
+          background: #ffffff;
+        }
+        .run-id-input:disabled { background: #f3f7f8; color: #60777d; }
         .movement-panel strong {
           display: block;
           margin-top: 2px;

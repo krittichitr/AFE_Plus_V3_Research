@@ -30,6 +30,11 @@ export type ResearchLoggerSnapshot = {
   clockStatus: ResearchClockStatus;
   hasData: boolean;
   exported: boolean;
+  m2Status: 'OFF' | 'STARTING' | 'READY' | 'STOPPING' | 'STOPPED' | 'INVALID';
+  m2Error: string | null;
+  walkingState: 'NOT_STARTED' | 'ACTIVE' | 'COMPLETED';
+  walkingWindowId: string | null;
+  videoSyncId: string | null;
 };
 
 type AppendOptions = {
@@ -60,9 +65,17 @@ let lastDroppedMonotonicUs: number | null = null;
 let highWaterMark = 0;
 let clockStatus: ResearchClockStatus = 'NOT_SYNCED';
 let exported = false;
+let m2Status: ResearchLoggerSnapshot['m2Status'] = 'OFF';
+let m2RunToken: string | null = null;
+let m2Error: string | null = null;
+let m2StartGeneration = 0;
 let runGeneration = 0;
 let runPerformanceOriginMs = 0;
 let runWallClockOriginMs = 0;
+let walkingState: ResearchLoggerSnapshot['walkingState'] = 'NOT_STARTED';
+let walkingWindowId: string | null = null;
+let videoSyncId: string | null = null;
+let videoSyncSequence = 0;
 
 let snapshot: ResearchLoggerSnapshot = createSnapshot();
 
@@ -76,6 +89,11 @@ function createSnapshot(): ResearchLoggerSnapshot {
     clockStatus,
     hasData: events.length > 0,
     exported,
+    m2Status,
+    m2Error,
+    walkingState,
+    walkingWindowId,
+    videoSyncId,
   };
 }
 
@@ -90,12 +108,12 @@ function publish(): void {
   });
 }
 
-function wallClockFields(): Pick<ResearchEvent, 'wall_clock_utc' | 'wall_clock_ms' | 'mono_ms'> {
+function wallClockFields(capturedPerformanceMs = performance.now()): Pick<ResearchEvent, 'wall_clock_utc' | 'wall_clock_ms' | 'mono_ms'> {
   const wallClockMs = Date.now();
   return {
     wall_clock_utc: new Date(wallClockMs).toISOString(),
     wall_clock_ms: wallClockMs,
-    mono_ms: performance.now(),
+    mono_ms: capturedPerformanceMs,
   };
 }
 
@@ -143,7 +161,7 @@ function appendForRun(
     platform: 'web',
     system_version: 'V3',
     monotonic_us: monotonicUs,
-    ...(options.hot ? {} : wallClockFields()),
+    ...(options.hot ? {} : wallClockFields(capturedPerformanceMs)),
   }));
   highWaterMark = Math.max(highWaterMark, events.length);
   if (!options.hot) publish();
@@ -179,6 +197,50 @@ async function recordClockSync(expectedRunId: string, generation: number): Promi
   publish();
 }
 
+export async function startM2ResearchRun(requestedRunId: string): Promise<string | null> {
+  if (status === 'RECORDING' || m2Status === 'STARTING') return null;
+  const runId = requestedRunId.trim().slice(0, 200) || defaultRunId();
+  const generation = ++m2StartGeneration;
+  m2Status = 'STARTING';
+  m2Error = null;
+  publish();
+  try {
+    const response = await fetch('/api/research/m2-journal', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ research_run_id: runId, boundary: 'start' }),
+    });
+    const result = await response.json() as { m2_run_token?: unknown; integrity_status?: string };
+    if (!response.ok || typeof result.m2_run_token !== 'string' || !result.m2_run_token) {
+      throw new Error(result.integrity_status || 'M2_DURABILITY_NOT_AVAILABLE');
+    }
+    if (generation !== m2StartGeneration) return null;
+    m2RunToken = result.m2_run_token;
+    const startedId = startResearchRun(runId);
+    m2Status = 'READY';
+    publish();
+    return startedId;
+  } catch (error) {
+    if (generation !== m2StartGeneration) return null;
+    m2Status = 'INVALID';
+    m2Error = error instanceof Error ? error.message : 'M2_DURABILITY_NOT_AVAILABLE';
+    publish();
+    return null;
+  }
+}
+
+export function getReadyM2ResearchContext(): { researchRunId: string; token: string } | null {
+  return status === 'RECORDING' && m2Status === 'READY' && researchRunId && m2RunToken
+    ? { researchRunId, token: m2RunToken } : null;
+}
+
+export function invalidateM2ResearchRun(reason: string): void {
+  if (!m2RunToken || !researchRunId || m2Status === 'INVALID') return;
+  m2Status = 'INVALID';
+  m2Error = reason;
+  appendForRun({ event: 'm2_integrity_error', reason }, researchRunId, { allowStopped: true });
+  publish();
+}
+
 export function startResearchRun(requestedRunId: string): string | null {
   if (status === 'RECORDING') return researchRunId;
 
@@ -195,6 +257,10 @@ export function startResearchRun(requestedRunId: string): string | null {
   highWaterMark = 0;
   clockStatus = 'NOT_SYNCED';
   exported = false;
+  walkingState = 'NOT_STARTED';
+  walkingWindowId = null;
+  videoSyncId = null;
+  videoSyncSequence = 0;
   runPerformanceOriginMs = performance.now();
   runWallClockOriginMs = Date.now();
   status = 'RECORDING';
@@ -221,13 +287,83 @@ export function startResearchRun(requestedRunId: string): string | null {
 export function stopResearchRun(): void {
   if (status !== 'RECORDING' || !researchRunId) return;
   appendForRun({ event: 'run_stop', ...loggerHealthDetails() }, researchRunId, { control: true });
+  if (m2RunToken) {
+    const stoppedRunId = researchRunId;
+    const token = m2RunToken;
+    const invalid = m2Status === 'INVALID';
+    m2Status = 'STOPPING';
+    void fetch('/api/research/m2-journal', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ research_run_id: stoppedRunId, m2_run_token: token, boundary: 'stop', invalid }),
+    }).then((response) => {
+      if (!response.ok) throw new Error('M2_STOP_NOT_JOURNALED');
+      if (researchRunId === stoppedRunId) m2Status = invalid ? 'INVALID' : 'STOPPED';
+    }).catch(() => {
+      if (researchRunId === stoppedRunId) {
+        m2Status = 'INVALID';
+        m2Error = 'M2_STOP_NOT_JOURNALED';
+      }
+    }).finally(publish);
+  }
   status = 'STOPPED';
+  walkingState = 'NOT_STARTED';
+  walkingWindowId = null;
+  videoSyncId = null;
   publish();
+}
+
+export function startWalkingWindow(): string | null {
+  if (status !== 'RECORDING' || !researchRunId || walkingState !== 'NOT_STARTED') return null;
+  const id = crypto.randomUUID();
+  const recorded = appendForRun({
+    event: 'walking_window_start',
+    walking_window_id: id,
+    annotation_source: 'manual_operator',
+  }, researchRunId, { capturedPerformanceMs: performance.now() });
+  if (recorded === null) return null;
+  walkingWindowId = id;
+  walkingState = 'ACTIVE';
+  publish();
+  return id;
+}
+
+export function markVideoSync(): string | null {
+  if (status !== 'RECORDING' || !researchRunId) return null;
+  const syncId = crypto.randomUUID();
+  const nextSequence = videoSyncSequence + 1;
+  const recorded = appendForRun({
+    event: 'video_sync_marker',
+    sync_id: syncId,
+    sync_sequence: nextSequence,
+    walking_window_id: walkingWindowId,
+  }, researchRunId, { capturedPerformanceMs: performance.now() });
+  if (recorded === null) return null;
+  videoSyncSequence = nextSequence;
+  videoSyncId = syncId;
+  publish();
+  return syncId;
+}
+
+export function stopWalkingWindow(): boolean {
+  if (status !== 'RECORDING' || !researchRunId || walkingState !== 'ACTIVE' || !walkingWindowId) return false;
+  const recorded = appendForRun({
+    event: 'walking_window_stop',
+    walking_window_id: walkingWindowId,
+    annotation_source: 'manual_operator',
+  }, researchRunId, { capturedPerformanceMs: performance.now() });
+  if (recorded === null) return false;
+  walkingState = 'COMPLETED';
+  publish();
+  return true;
 }
 
 export function clearResearchRun(): void {
   if (status === 'RECORDING') return;
   runGeneration += 1;
+  m2StartGeneration += 1;
+  m2Status = 'OFF';
+  m2RunToken = null;
+  m2Error = null;
   events = [];
   status = 'IDLE';
   researchRunId = null;
@@ -242,6 +378,10 @@ export function clearResearchRun(): void {
   highWaterMark = 0;
   clockStatus = 'NOT_SYNCED';
   exported = false;
+  walkingState = 'NOT_STARTED';
+  walkingWindowId = null;
+  videoSyncId = null;
+  videoSyncSequence = 0;
   runPerformanceOriginMs = 0;
   runWallClockOriginMs = 0;
   publish();
@@ -250,6 +390,11 @@ export function clearResearchRun(): void {
 export function appendResearchProvenanceEvent(input: ResearchEventInput): boolean {
   if (status !== 'RECORDING' || !researchRunId) return false;
   return appendForRun(input, researchRunId) !== null;
+}
+
+export function appendResearchProvenanceEventAt(input: ResearchEventInput, capturedPerformanceMs: number): boolean {
+  if (status !== 'RECORDING' || !researchRunId) return false;
+  return appendForRun(input, researchRunId, { capturedPerformanceMs }) !== null;
 }
 
 /** Hot-path M4/M5 append. Serialization and I/O are deferred until export. */

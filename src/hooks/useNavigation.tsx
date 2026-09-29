@@ -5,7 +5,14 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { NavigationService, LatLng, NavigationMode } from '@/lib/services/navigation.service';
 import type { NavigationManeuver, RouteProvenance } from '@/lib/navigation/types';
-import { getRecordingResearchRunId } from '@/lib/research/provenanceEvents';
+import { getRecordingResearchRunId, getReadyM2ResearchContext, invalidateM2ResearchRun } from '@/lib/research/provenanceEvents';
+import { isExplicitM2ResearchMode } from '@/lib/research/m2Mode';
+import {
+  acceptM1FrontendCandidate,
+  closeM1FrontendUpdate,
+  closePendingM1Frontend,
+  startM1FrontendUpdate,
+} from '@/lib/research/m1Frontend';
 
 const STORAGE_KEY = 'afe_navigation_session';
 const SESSION_TTL_MS = 15 * 60 * 1000;
@@ -123,6 +130,7 @@ function createRouteProvenance(
   researchRequestPhase: NonNullable<RouteProvenance['research_request_phase']>,
 ): RouteProvenance {
   const researchRunId = getRecordingResearchRunId();
+  const m2Context = isExplicitM2ResearchMode() ? getReadyM2ResearchContext() : null;
   return Object.freeze({
     route_update_id: crypto.randomUUID(),
     target_sample_id: target.targetSampleId,
@@ -131,6 +139,7 @@ function createRouteProvenance(
     ...(researchRunId ? {
       research_run_id: researchRunId,
       research_request_phase: researchRequestPhase,
+      ...(m2Context ? { m2_research_mode: true as const, m2_run_token: m2Context.token } : {}),
     } : {}),
   });
 }
@@ -254,6 +263,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
   const [routeCandidateProvenance, setRouteCandidateProvenance] = useState<RouteProvenance | null>(null);
 
   const navService = useRef(new NavigationService()).current;
+  useEffect(() => () => closePendingM1Frontend('aborted'), []);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isRestoringRef = useRef(false); // ✅ ป้องกัน infinite loop
   const isInitializingRef = useRef(false);
@@ -303,6 +313,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
   }, []);
 
   const clearNavigationSession = useCallback((reason = 'fresh_start') => {
+    closePendingM1Frontend('aborted');
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
     abortControllerRef.current?.abort();
@@ -330,6 +341,11 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
   useEffect(() => {
     const restoreSession = async () => {
       try {
+        if (isExplicitM2ResearchMode()) {
+          localStorage.removeItem(STORAGE_KEY);
+          setRestoreChecked(true);
+          return;
+        }
         const stored = localStorage.getItem(STORAGE_KEY);
         if (!stored) {
           setRestoreChecked(true);
@@ -499,6 +515,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
   }, [clearNavigationSession]);
 
   const markArrived = useCallback(() => {
+    closePendingM1Frontend('aborted');
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
     abortControllerRef.current?.abort();
@@ -516,6 +533,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
     gpsAgeMs: number | null = null,
     announceFreshStart = true,
   ): Promise<StartResult | void> => {
+    if (isExplicitM2ResearchMode() && !getReadyM2ResearchContext()) return;
     if (isInitializingRef.current) return;
     isInitializingRef.current = true;
 
@@ -538,8 +556,15 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
     try {
       const routeProvenance = createRouteProvenance(target, 'init');
       const data = await navService.init(agent, target, mode, routeProvenance);
+      if (isExplicitM2ResearchMode() && (data as any).m2_instrumentation_error) {
+        invalidateM2ResearchRun((data as any).m2_instrumentation_error);
+        setStatus('error');
+        setRouteUxState('error');
+        return;
+      }
 
       if ((data as any).error) {
+        if (isExplicitM2ResearchMode()) invalidateM2ResearchRun('M2_INIT_RESPONSE_ERROR_OR_LOSS');
         if ((data as any).rateLimit) {
           console.warn('⚠️ Rate limit exceeded (429), retrying in 2 seconds...');
           setTimeout(() => start(agent, target, mode, gpsAgeMs, announceFreshStart), 2000);
@@ -627,6 +652,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
     if (status !== 'active' || !sessionId) return;
 
     pollRef.current = setInterval(async () => {
+      if (isExplicitM2ResearchMode() && !getReadyM2ResearchContext()) return;
       // ── In-flight guard: skip tick if previous request hasn't finished ──────
       if (isUpdateInFlightRef.current) {
         return;
@@ -645,6 +671,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
       const targetPos = targetRef.current;
       const routeProvenance = createRouteProvenance(targetPos, 'incremental');
       try {
+        startM1FrontendUpdate(sessionId, routeProvenance);
         const data = await navService.update(
           sessionId,
           agentPos,
@@ -652,16 +679,25 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
           controller.signal,
           routeProvenance,
         );
+        if (isExplicitM2ResearchMode() && 'm2_instrumentation_error' in data) {
+          invalidateM2ResearchRun(String(data.m2_instrumentation_error));
+          setStatus('error');
+          setRouteUxState('error');
+          return;
+        }
         const durationMs = Date.now() - startedAt;
 
         // ── Stale response guard ─────────────────────────────────────────────
         if (seq <= latestAppliedSeqRef.current) {
+          closeM1FrontendUpdate(routeProvenance.route_update_id, 'stale');
           return;
         }
 
         // ── API error / 429 backoff ──────────────────────────────────────────
         // 'error' in data discriminates ApiError from UpdateResponse
         if ('error' in data) {
+          if (isExplicitM2ResearchMode()) invalidateM2ResearchRun('M2_UPDATE_RESPONSE_ERROR_OR_LOSS');
+          closeM1FrontendUpdate(routeProvenance.route_update_id, data.rateLimit ? 'rate_limited' : 'api_or_transport_error');
           if (data.rateLimit) {
             console.warn('[NAV] NAV_UPDATE_RATE_LIMIT_BACKOFF', { seq, sessionId, durationMs });
             setPollMs(15000);
@@ -677,6 +713,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
 
         // ── Session expired → silent re-init ─────────────────────────────────
         if ('sessionExpired' in data && data.sessionExpired) {
+          closeM1FrontendUpdate(routeProvenance.route_update_id, 'session_expired');
           start(agentRef.current, targetRef.current, 'hybrid', null, false);
           return;
         }
@@ -684,6 +721,23 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
         // By this point 'error' branch and sessionExpired branch have both returned.
         // TypeScript narrows data to UpdateResponse & { sessionExpired?: boolean }.
         const updateData = data;
+        const backendM1End = updateData.research_events?.find((event) =>
+          event.event === 'route_update_end' &&
+          event.route_update_id === routeProvenance.route_update_id,
+        );
+        const incrementalCandidate = backendM1End?.m1_eligible === true;
+        if (!incrementalCandidate) {
+          const refetched = updateData.lastMetric?.replanType === 'refetch'
+            || updateData.lastMetric?.replanType === 'mapbox_call'
+            || updateData.lastMetric?.mapboxApiCalled === true
+            || updateData.research_events?.some((event) => event.event === 'mapbox_http_attempt') === true;
+          const blocked = updateData.lastMetric?.replanType === 'blocked';
+          closeM1FrontendUpdate(
+            routeProvenance.route_update_id,
+            refetched ? 'graph_refetch' : blocked ? 'blocked' : updateData.success === false ? 'failed' : 'fallback',
+            refetched ? 'graph_refetch' : blocked ? 'blocked' : 'fallback',
+          );
+        }
         const responsePathLast =
           Array.isArray(updateData.path) && updateData.path.length > 0
             ? updateData.path[updateData.path.length - 1]
@@ -705,12 +759,14 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
         // ── Backend terminal state: ARRIVED may intentionally carry path:[] ─────
         // Handle it before the route guard so arrival does not require renderable geometry.
         if (isBackendArrivedResponse(updateData)) {
+          closeM1FrontendUpdate(routeProvenance.route_update_id, 'arrived');
           markArrived();
           return;
         }
 
         // ── Invariant guard (shared) ──────────────────────────────────────────
         if (!canApplyRoutePath(updateData.path, updateData.status, updateData.success)) {
+          closeM1FrontendUpdate(routeProvenance.route_update_id, 'invalid_response');
           const nonFatalReason =
             updateData.status === 'NO_ROUTE'
               ? updateData.refetchReason ?? updateData.lastMetric?.refetchReason ?? 'no_route'
@@ -754,6 +810,11 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
         const prevTail         = lastAppliedTailSigRef.current;
         const mapboxCalledNow  = updateMeta.lastMetric?.mapboxApiCalled === true;
         const refetchReasonNow = updateMeta.lastMetric?.refetchReason ?? updateMeta.refetchReason ?? null;
+        if (prevFull === null) {
+          closeM1FrontendUpdate(routeProvenance.route_update_id, 'initial_route', 'initial');
+        } else if (mapboxCalledNow || refetchReasonNow != null) {
+          closeM1FrontendUpdate(routeProvenance.route_update_id, 'graph_refetch', 'graph_refetch');
+        }
 
         if (prevFull === null) {
           // Branch 1: First polling response for this session → always apply
@@ -777,6 +838,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
           lastAppliedTailSigRef.current = incomingTail;
         } else if (incomingFull === prevFull) {
           // Branch 3: Exact duplicate — skip apply entirely (no setPath, no increment)
+          closeM1FrontendUpdate(routeProvenance.route_update_id, 'no_change');
         } else if (prevBody !== null && incomingBody === prevBody) {
           // Branch 4: Same endpoint — could be agent-side trim OR MT-D* mid-route change.
           // tailSignature (path[1..n]) distinguishes the two cases:
@@ -792,6 +854,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
             incrementRouteVersion();
             // Source key NOT incremented — MT-D* incremental replan must NOT remount Source
           } else {
+            closeM1FrontendUpdate(routeProvenance.route_update_id, 'no_change');
           }
         } else {
           // Branch 5: Route body changed without Mapbox API call (MT-D* replanned on its own)
@@ -808,6 +871,10 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
         }
 
         setDistance(updateData.totalCost || 0);
+        if (incrementalCandidate && prevFull !== null && !mapboxCalledNow
+          && refetchReasonNow == null && incomingFull !== prevFull) {
+          acceptM1FrontendCandidate(routeProvenance.route_update_id);
+        }
         setEta(updateData.estimatedTimeSeconds || 0);
         setRouteUxState('navigating');
 
@@ -817,8 +884,10 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
         }
       } catch (err: any) {
         if (err?.name === 'AbortError') {
+          closeM1FrontendUpdate(routeProvenance.route_update_id, 'aborted');
           return;
         }
+        closeM1FrontendUpdate(routeProvenance.route_update_id, 'failed');
         console.error('[NAV] Polling error', { seq, sessionId, durationMs: Date.now() - startedAt, err });
         setRouteUxState('routeTemporarilyUnavailable');
       } finally {

@@ -24,6 +24,8 @@ export const RouteProvenanceSchema = z.object({
   target_ref_lng: z.number().min(-180).max(180),
   research_run_id: z.string().min(1).max(200).optional(),
   research_request_phase: z.enum(['init', 'restore', 'incremental']).optional(),
+  m2_research_mode: z.literal(true).optional(),
+  m2_run_token: z.string().min(1).max(200).optional(),
 });
 
 // ─── POST /api/navigate/init ──────────────────────────────────────────────────

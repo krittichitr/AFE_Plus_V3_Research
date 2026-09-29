@@ -1,4 +1,4 @@
-import type { NavigationManeuver, RouteProvenance } from '@/lib/navigation/types';
+import type { BackendResearchEvent, NavigationManeuver, RouteProvenance } from '@/lib/navigation/types';
 import { appendBackendResearchEvents } from '@/lib/research/provenanceEvents';
 
 export interface LatLng {
@@ -73,6 +73,7 @@ interface ApiError {
   status: number;
   rateLimit?: boolean;
   message?: string;
+  m2_instrumentation_error?: string;
 }
 
 interface UpdateResponse {
@@ -110,10 +111,11 @@ interface UpdateResponse {
   endpointEnforced?: boolean | null;
   lastMetric?: UpdateMetric;
   routeProvenance?: RouteProvenance | null;
+  research_events?: BackendResearchEvent[];
 }
 
-async function extractResearchEvents(response: Response, researchRunId: string | null): Promise<void> {
-  if (!researchRunId) return;
+async function extractResearchEvents(response: Response, researchRunId: string | null): Promise<string | null> {
+  if (!researchRunId) return null;
   try {
     const body: unknown = await response.clone().json();
     if (body && typeof body === 'object') {
@@ -121,10 +123,13 @@ async function extractResearchEvents(response: Response, researchRunId: string |
         (body as { research_events?: unknown }).research_events,
         researchRunId,
       );
+      const error = (body as { m2_instrumentation_error?: unknown }).m2_instrumentation_error;
+      return typeof error === 'string' ? error : null;
     }
   } catch {
     // Research extraction is observational and never changes navigation handling.
   }
+  return null;
 }
 
 export class NavigationService {
@@ -154,8 +159,8 @@ export class NavigationService {
         return { error: true, status: 429, rateLimit: true };
       }
       if (!res.ok) {
-        await extractResearchEvents(res, researchRunId);
-        return { error: true, status: res.status };
+        const m2Error = await extractResearchEvents(res, researchRunId);
+        return { error: true, status: res.status, ...(m2Error ? { m2_instrumentation_error: m2Error } : {}) };
       }
       
       const body = await res.json();
@@ -197,8 +202,8 @@ export class NavigationService {
         return { error: true, status: 429, rateLimit: true };
       }
       if (!res.ok) {
-        await extractResearchEvents(res, researchRunId);
-        return { error: true, status: res.status };
+        const m2Error = await extractResearchEvents(res, researchRunId);
+        return { error: true, status: res.status, ...(m2Error ? { m2_instrumentation_error: m2Error } : {}) };
       }
 
       const body = await res.json();

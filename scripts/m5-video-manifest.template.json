@@ -1,0 +1,10 @@
+{
+  "schema_version": "m5-video-manifest-v1",
+  "protocol_version": "M5-PROTOCOL-V1",
+  "research_run_id": "REPLACE_WITH_EXPORTED_RUN_ID",
+  "platform": "web",
+  "video_file": "REPLACE_WITH_VIDEO_FILE_PATH",
+  "video_file_hash_sha256": null,
+  "navigation_log_file": "REPLACE_WITH_JSONL_FILE_PATH",
+  "walking_window_id": "REPLACE_WITH_EXPORTED_WINDOW_ID"
+}
