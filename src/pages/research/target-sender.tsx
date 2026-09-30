@@ -98,6 +98,20 @@ type CalibrationPhaseTraceRecord = {
   mono_ms: number;
 };
 
+const CALIBRATION_PHASE_LABELS: Record<CalibrationPhaseTraceRecord['phase'], string> = {
+  STATIONARY_START: 'เริ่มช่วงอยู่นิ่ง',
+  STATIONARY_END: 'จบช่วงอยู่นิ่ง',
+  WALK_START: 'เริ่มเดิน',
+  WALK_END: 'จบการเดิน',
+};
+
+const CALIBRATION_PHASE_BUTTONS: Array<{ phase: CalibrationPhaseTraceRecord['phase']; label: string }> = [
+  { phase: 'STATIONARY_START', label: 'STATIONARY START' },
+  { phase: 'WALK_START', label: 'WALK START' },
+  { phase: 'WALK_END', label: 'WALK END' },
+  { phase: 'STATIONARY_END', label: 'STATIONARY END' },
+];
+
 type TargetTraceRecord = SenderStartTraceRecord | TargetSampleTraceRecord |
   ClockSyncTraceRecord | ClockSyncIncompleteTraceRecord | GpsSegmentTraceRecord |
   RejectedObservationTraceRecord | CalibrationPhaseTraceRecord;
@@ -182,6 +196,11 @@ export default function TargetSenderPage() {
   const [successfulSends, setSuccessfulSends] = useState(0);
   const [failedSends, setFailedSends] = useState(0);
   const [traceRecordCount, setTraceRecordCount] = useState(0);
+  const [latestCalibrationMarker, setLatestCalibrationMarker] = useState<{
+    phase: CalibrationPhaseTraceRecord['phase'];
+    wallClockUtc: string;
+    count: number;
+  } | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [researchRunIdInput, setResearchRunIdInput] = useState('');
   const [activeResearchRunId, setActiveResearchRunId] = useState<string | null>(null);
@@ -291,15 +310,21 @@ export default function TargetSenderPage() {
 
   const recordCalibrationPhase = useCallback((phase: CalibrationPhaseTraceRecord['phase']) => {
     if (!activeRef.current || !senderSessionIdRef.current) return;
+    const wallClockUtc = new Date().toISOString();
     targetTraceRef.current.push(Object.freeze({
       event: 'calibration_phase',
       sender_session_id: senderSessionIdRef.current,
       research_run_id: researchRunIdRef.current,
       phase,
-      wall_clock_utc: new Date().toISOString(),
+      wall_clock_utc: wallClockUtc,
       mono_ms: performance.now(),
     }));
     setTraceRecordCount(targetTraceRef.current.length);
+    setLatestCalibrationMarker((previous) => ({
+      phase,
+      wallClockUtc,
+      count: (previous?.count ?? 0) + 1,
+    }));
   }, []);
 
   const queueSend = useCallback((
@@ -378,6 +403,7 @@ export default function TargetSenderPage() {
       interveningRejectedObservationRef.current = false;
       validatedDistanceRef.current = null;
       setValidatedDistanceM(null);
+      setLatestCalibrationMarker(null);
       startSampleRef.current = null;
       previousSampleRef.current = null;
       sendQueueRef.current = Promise.resolve();
@@ -555,6 +581,7 @@ export default function TargetSenderPage() {
     clockSyncScheduleRef.current = null;
     targetTraceRef.current = [];
     setTraceRecordCount(0);
+    setLatestCalibrationMarker(null);
   }, []);
 
   return (
@@ -638,12 +665,35 @@ export default function TargetSenderPage() {
 
         <section className="panel">
           <h2>Calibration Phase Markers</h2>
+          <p id="calibration-marker-help" className="calibration-help">
+            ปุ่มเหล่านี้บันทึกเวลาเริ่มและจบช่วงอยู่นิ่งหรือเดินลงใน Target Trace เท่านั้น ไม่ได้เริ่มหรือหยุด GPS หรือการส่งพิกัด
+          </p>
+          {!isSending && <p className="calibration-note">กด START SENDING ก่อน จึงจะบันทึกเครื่องหมายได้</p>}
           <div className="trace-controls">
-            <button type="button" className="trace-button" disabled={!isSending} onClick={() => recordCalibrationPhase('STATIONARY_START')}>STATIONARY START</button>
-            <button type="button" className="trace-button" disabled={!isSending} onClick={() => recordCalibrationPhase('WALK_START')}>WALK START</button>
-            <button type="button" className="trace-button" disabled={!isSending} onClick={() => recordCalibrationPhase('WALK_END')}>WALK END</button>
-            <button type="button" className="trace-button" disabled={!isSending} onClick={() => recordCalibrationPhase('STATIONARY_END')}>STATIONARY END</button>
+            {CALIBRATION_PHASE_BUTTONS.map(({ phase, label }) => {
+              const isLatest = latestCalibrationMarker?.phase === phase;
+              return (
+                <button
+                  key={phase}
+                  type="button"
+                  className={`trace-button phase-marker-button${isLatest ? ' is-latest' : ''}`}
+                  aria-describedby="calibration-marker-help"
+                  disabled={!isSending}
+                  onClick={() => recordCalibrationPhase(phase)}
+                >
+                  <span>{label}</span>
+                  {isLatest && <span className="phase-marker-badge">✓ ล่าสุด</span>}
+                </button>
+              );
+            })}
           </div>
+          {latestCalibrationMarker && (
+            <p className="calibration-feedback" role="status" aria-live="polite">
+              บันทึกแล้ว: {CALIBRATION_PHASE_LABELS[latestCalibrationMarker.phase]} เวลา{' '}
+              {new Date(latestCalibrationMarker.wallClockUtc).toLocaleTimeString('th-TH', { hour12: false })}
+              {' '}({latestCalibrationMarker.count} เครื่องหมายในรอบนี้)
+            </p>
+          )}
         </section>
 
         <div className="trace-controls">
@@ -765,6 +815,14 @@ export default function TargetSenderPage() {
           color: #19718a;
           font-size: 12px;
         }
+        .trace-button:disabled { cursor: not-allowed; opacity: 0.5; }
+        .phase-marker-button { min-height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; }
+        .phase-marker-button.is-latest { border-color: #0e7658; background: #0e7658; color: #ffffff; box-shadow: 0 0 0 3px rgba(14, 118, 88, 0.22); font-weight: 800; }
+        .phase-marker-button.is-latest:disabled { opacity: 1; }
+        .phase-marker-badge { padding: 1px 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.2); color: #ffffff; font-size: 11px; }
+        .calibration-help { margin: 8px 0 0; color: #425b63; font-size: 13px; line-height: 1.5; }
+        .calibration-note { margin: 10px 0 0; color: #785a12; font-size: 13px; }
+        .calibration-feedback { margin: 12px 0 0; color: #126543; font-size: 13px; font-weight: 700; }
         .clear-trace-button { border-color: #9e2436; color: #9e2436; }
         .secure-note { margin: 12px 0 0; color: #708287; font-size: 12px; text-align: center; }
         @media (max-width: 380px) {
