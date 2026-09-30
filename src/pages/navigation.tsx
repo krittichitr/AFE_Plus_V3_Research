@@ -697,6 +697,7 @@ function projectPointToRouteStable(
 function NavigationScreen() {
     const router = useRouter();
     const mapRef = useRef<MapRef>(null);
+    const topBannerRef = useRef<HTMLDivElement>(null);
     const researchLogger = useSyncExternalStore(
         subscribeResearchLogger,
         getResearchLoggerSnapshot,
@@ -3782,7 +3783,7 @@ function NavigationScreen() {
 
     return (
         <main className="relative w-full h-[100dvh] bg-[#EFEFEF] overflow-hidden font-sans">
-            <ResearchLogPanel className="absolute left-3 top-[96px] z-30" />
+            <ResearchLogPanel bannerRef={topBannerRef} collapsedZIndex={40} expandedZIndex={110} />
             <div
                 className="absolute inset-0"
                 onTouchStart={handleMapTouchStart}
@@ -3915,15 +3916,17 @@ function NavigationScreen() {
             </div>
 
             {/* --- 1. แถบบอกทางด้านบน --- */}
-            <TopNavigationBanner
-                maneuverIcon={topBannerManeuverIcon}
-                distance={topBannerInstruction.distance}
-                instruction={routeUxBanner ? routeUxBanner.title : topBannerInstruction.title}
-                subtitle={routeUxBanner ? (routeUxBanner.subtitle ?? null) : (lastMileLabel ?? null)}
-                action={routeUxBanner?.action ?? null}
-                onAction={routeUxBanner?.action ? handleRetryInitRoute : undefined}
-                isVisible={true}
-            />
+            <div ref={topBannerRef}>
+                <TopNavigationBanner
+                    maneuverIcon={topBannerManeuverIcon}
+                    distance={topBannerInstruction.distance}
+                    instruction={routeUxBanner ? routeUxBanner.title : topBannerInstruction.title}
+                    subtitle={routeUxBanner ? (routeUxBanner.subtitle ?? null) : (lastMileLabel ?? null)}
+                    action={routeUxBanner?.action ?? null}
+                    onAction={routeUxBanner?.action ? handleRetryInitRoute : undefined}
+                    isVisible={true}
+                />
+            </div>
 
 
 
