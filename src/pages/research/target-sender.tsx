@@ -98,19 +98,6 @@ type CalibrationPhaseTraceRecord = {
   mono_ms: number;
 };
 
-const CALIBRATION_PHASE_LABELS: Record<CalibrationPhaseTraceRecord['phase'], string> = {
-  STATIONARY_START: 'เริ่มช่วงอยู่นิ่ง',
-  STATIONARY_END: 'จบช่วงอยู่นิ่ง',
-  WALK_START: 'เริ่มเดิน',
-  WALK_END: 'จบการเดิน',
-};
-
-const CALIBRATION_PHASE_BUTTONS: Array<{ phase: CalibrationPhaseTraceRecord['phase']; label: string }> = [
-  { phase: 'STATIONARY_START', label: 'STATIONARY START' },
-  { phase: 'WALK_START', label: 'WALK START' },
-  { phase: 'WALK_END', label: 'WALK END' },
-  { phase: 'STATIONARY_END', label: 'STATIONARY END' },
-];
 
 type TargetTraceRecord = SenderStartTraceRecord | TargetSampleTraceRecord |
   ClockSyncTraceRecord | ClockSyncIncompleteTraceRecord | GpsSegmentTraceRecord |
@@ -196,11 +183,6 @@ export default function TargetSenderPage() {
   const [successfulSends, setSuccessfulSends] = useState(0);
   const [failedSends, setFailedSends] = useState(0);
   const [traceRecordCount, setTraceRecordCount] = useState(0);
-  const [latestCalibrationMarker, setLatestCalibrationMarker] = useState<{
-    phase: CalibrationPhaseTraceRecord['phase'];
-    wallClockUtc: string;
-    count: number;
-  } | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [researchRunIdInput, setResearchRunIdInput] = useState('');
   const [activeResearchRunId, setActiveResearchRunId] = useState<string | null>(null);
@@ -308,24 +290,6 @@ export default function TargetSenderPage() {
     });
   }, []);
 
-  const recordCalibrationPhase = useCallback((phase: CalibrationPhaseTraceRecord['phase']) => {
-    if (!activeRef.current || !senderSessionIdRef.current) return;
-    const wallClockUtc = new Date().toISOString();
-    targetTraceRef.current.push(Object.freeze({
-      event: 'calibration_phase',
-      sender_session_id: senderSessionIdRef.current,
-      research_run_id: researchRunIdRef.current,
-      phase,
-      wall_clock_utc: wallClockUtc,
-      mono_ms: performance.now(),
-    }));
-    setTraceRecordCount(targetTraceRef.current.length);
-    setLatestCalibrationMarker((previous) => ({
-      phase,
-      wallClockUtc,
-      count: (previous?.count ?? 0) + 1,
-    }));
-  }, []);
 
   const queueSend = useCallback((
     sample: TargetGpsSample,
@@ -403,7 +367,6 @@ export default function TargetSenderPage() {
       interveningRejectedObservationRef.current = false;
       validatedDistanceRef.current = null;
       setValidatedDistanceM(null);
-      setLatestCalibrationMarker(null);
       startSampleRef.current = null;
       previousSampleRef.current = null;
       sendQueueRef.current = Promise.resolve();
@@ -581,14 +544,12 @@ export default function TargetSenderPage() {
     clockSyncScheduleRef.current = null;
     targetTraceRef.current = [];
     setTraceRecordCount(0);
-    setLatestCalibrationMarker(null);
   }, []);
 
   return (
     <main className="sender-page">
       <section className="sender-card">
         <header>
-          <p className="eyebrow">Research utility</p>
           <h1>AFE+ V3 Target Sender</h1>
           <p className="subtitle">ส่งตำแหน่งจริงจาก GPS ของโทรศัพท์เป้าหมาย</p>
         </header>
@@ -606,8 +567,7 @@ export default function TargetSenderPage() {
           </div>
         </div>
 
-        <section className="panel">
-          <h2>Run Linkage</h2>
+        <section className="panel run-panel">
           <label htmlFor="research-run-id" className="field-label">Research Run ID</label>
           <input
             id="research-run-id"
@@ -618,10 +578,6 @@ export default function TargetSenderPage() {
             disabled={isSending || isStarting}
             placeholder="ตรงกับ Run ID ของ navigation logger"
           />
-          <dl className="data-list">
-            <div><dt>Active Run ID</dt><dd>{activeResearchRunId ?? '—'}</dd></div>
-            <div><dt>Sender Session ID</dt><dd>{activeSenderSessionId ?? '—'}</dd></div>
-          </dl>
         </section>
 
         <section className="panel">
@@ -633,18 +589,8 @@ export default function TargetSenderPage() {
           </dl>
         </section>
 
-        <section className="panel movement-panel">
-          <h2>Movement Evidence</h2>
-          <span>Raw GPS Distance</span>
-          <strong>{cumulativeDistanceM.toFixed(1)} m</strong>
-          <span>Validated Distance</span>
-          <strong>{validatedDistanceM === null ? 'NOT CONFIGURED' : validatedDistanceM.toFixed(1) + ' m'}</strong>
-          <span>Distance Quality</span>
-          <strong>CALIBRATION</strong>
-        </section>
-
         <section className="panel">
-          <h2>Counters</h2>
+          <h2>Sending Summary</h2>
           <dl className="data-list counters">
             <div><dt>GPS Samples</dt><dd>{gpsSamples}</dd></div>
             <div><dt>Successful Sends</dt><dd>{successfulSends}</dd></div>
@@ -663,39 +609,6 @@ export default function TargetSenderPage() {
           {isStarting ? 'STARTING…' : isSending ? 'STOP SENDING' : 'START SENDING'}
         </button>
 
-        <section className="panel">
-          <h2>Calibration Phase Markers</h2>
-          <p id="calibration-marker-help" className="calibration-help">
-            ปุ่มเหล่านี้บันทึกเวลาเริ่มและจบช่วงอยู่นิ่งหรือเดินลงใน Target Trace เท่านั้น ไม่ได้เริ่มหรือหยุด GPS หรือการส่งพิกัด
-          </p>
-          {!isSending && <p className="calibration-note">กด START SENDING ก่อน จึงจะบันทึกเครื่องหมายได้</p>}
-          <div className="trace-controls">
-            {CALIBRATION_PHASE_BUTTONS.map(({ phase, label }) => {
-              const isLatest = latestCalibrationMarker?.phase === phase;
-              return (
-                <button
-                  key={phase}
-                  type="button"
-                  className={`trace-button phase-marker-button${isLatest ? ' is-latest' : ''}`}
-                  aria-describedby="calibration-marker-help"
-                  disabled={!isSending}
-                  onClick={() => recordCalibrationPhase(phase)}
-                >
-                  <span>{label}</span>
-                  {isLatest && <span className="phase-marker-badge">✓ ล่าสุด</span>}
-                </button>
-              );
-            })}
-          </div>
-          {latestCalibrationMarker && (
-            <p className="calibration-feedback" role="status" aria-live="polite">
-              บันทึกแล้ว: {CALIBRATION_PHASE_LABELS[latestCalibrationMarker.phase]} เวลา{' '}
-              {new Date(latestCalibrationMarker.wallClockUtc).toLocaleTimeString('th-TH', { hour12: false })}
-              {' '}({latestCalibrationMarker.count} เครื่องหมายในรอบนี้)
-            </p>
-          )}
-        </section>
-
         <div className="trace-controls">
           <button type="button" className="trace-button" disabled={traceRecordCount === 0 || isSending || isStarting} onClick={exportTargetTrace}>
             EXPORT TARGET TRACE
@@ -705,100 +618,158 @@ export default function TargetSenderPage() {
           </button>
         </div>
 
+        <details className="details-drawer">
+          <summary>Details</summary>
+          <dl className="data-list">
+            <div><dt>Active Run ID</dt><dd>{activeResearchRunId ?? '—'}</dd></div>
+            <div><dt>Sender Session ID</dt><dd>{activeSenderSessionId ?? '—'}</dd></div>
+          </dl>
+        </details>
+
         <p className="secure-note">ต้องเปิดผ่าน HTTPS และอนุญาต Location บนเบราว์เซอร์</p>
       </section>
 
       <style jsx>{`
         .sender-page {
           min-height: 100vh;
-          padding: 20px 14px 36px;
+          min-height: 100dvh;
+          padding: max(10px, env(safe-area-inset-top)) 10px max(14px, env(safe-area-inset-bottom));
           background: #f3f7f8;
           color: #18343b;
+          box-sizing: border-box;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: flex-start;
         }
         .sender-card {
-          width: min(100%, 520px);
+          width: 100%;
+          max-width: 440px;
           margin: 0 auto;
-          padding: 24px 18px;
+          padding: 14px 14px;
           background: #ffffff;
           border: 1px solid #dbe6e9;
-          border-radius: 22px;
-          box-shadow: 0 12px 34px rgba(31, 72, 82, 0.12);
+          border-radius: 18px;
+          box-shadow: 0 8px 24px rgba(31, 72, 82, 0.08);
+          box-sizing: border-box;
         }
-        header { text-align: center; margin-bottom: 20px; }
-        .eyebrow {
-          margin: 0 0 4px;
-          color: #4d8d9a;
+        header { text-align: center; margin-bottom: 8px; }
+        h1 {
+          margin: 0;
+          color: #18343b;
+          font-size: clamp(20px, 5.2vw, 24px);
+          line-height: 1.2;
+          font-weight: 800;
+        }
+        .subtitle {
+          margin: 3px 0 0;
+          color: #5f7479;
           font-size: 13px;
-          font-weight: 700;
-          letter-spacing: 0.08em;
-          text-transform: uppercase;
+          line-height: 1.3;
         }
-        h1 { margin: 0; color: #18343b; font-size: clamp(25px, 7vw, 34px); }
-        .subtitle { margin: 6px 0 0; color: #5f7479; font-size: 15px; }
-        .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .status-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+        }
         .status-box, .panel {
           border: 1px solid #dbe6e9;
-          border-radius: 16px;
+          border-radius: 14px;
           background: #fbfdfd;
         }
-        .status-box { padding: 14px; }
-        .status-box span, .movement-panel span { display: block; color: #60777d; font-size: 13px; }
-        .status { display: block; margin-top: 3px; font-size: 19px; }
+        .status-box {
+          padding: 8px 10px;
+        }
+        .status-box span {
+          display: block;
+          color: #60777d;
+          font-size: 11px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .status {
+          display: block;
+          margin-top: 2px;
+          font-size: 16px;
+          font-weight: 700;
+          line-height: 1.2;
+        }
         .waiting, .stopped { color: #68777b; }
         .ready, .sending { color: #16835b; }
         .error { color: #c43d4f; }
-        .panel { margin-top: 12px; padding: 16px; }
-        .panel h2 { margin: 0 0 10px; color: #274f58; font-size: 16px; }
+        .panel {
+          margin-top: 8px;
+          padding: 8px 12px;
+        }
+        .panel h2 {
+          margin: 0 0 4px;
+          color: #274f58;
+          font-size: 13px;
+          font-weight: 700;
+          letter-spacing: 0.02em;
+        }
+        .run-panel {
+          padding: 8px 12px;
+        }
+        .field-label {
+          display: block;
+          margin-bottom: 4px;
+          color: #274f58;
+          font-size: 13px;
+          font-weight: 700;
+        }
+        .run-id-input {
+          width: 100%;
+          height: 36px;
+          min-height: 36px;
+          margin: 0;
+          padding: 6px 10px;
+          border: 1px solid #dbe6e9;
+          border-radius: 10px;
+          font-size: 13px;
+          color: #18343b;
+          background: #ffffff;
+          box-sizing: border-box;
+        }
+        .run-id-input:disabled { background: #f3f7f8; color: #60777d; }
         .data-list { margin: 0; }
         .data-list div {
           display: flex;
           align-items: baseline;
           justify-content: space-between;
-          gap: 16px;
-          padding: 8px 0;
-          border-bottom: 1px solid #e8eff1;
+          gap: 12px;
+          padding: 4px 0;
+          border-bottom: 1px solid #edf3f5;
         }
         .data-list div:last-child { border-bottom: 0; }
-        dt { color: #60777d; font-size: 14px; }
-        dd { margin: 0; color: #18343b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; }
-        .field-label { display: block; margin-bottom: 6px; color: #60777d; font-size: 13px; }
-        .run-id-input {
-          width: 100%;
-          min-height: 40px;
-          margin: 0 0 12px;
-          padding: 8px 10px;
-          border: 1px solid #dbe6e9;
-          border-radius: 10px;
-          font-size: 14px;
+        dt { color: #60777d; font-size: 13px; }
+        dd {
+          margin: 0;
           color: #18343b;
-          background: #ffffff;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 13px;
+          font-weight: 700;
+          word-break: break-all;
         }
-        .run-id-input:disabled { background: #f3f7f8; color: #60777d; }
-        .movement-panel strong {
-          display: block;
-          margin-top: 2px;
-          color: #19718a;
-          font-size: 34px;
-          line-height: 1.2;
-        }
-        .counters dd { font-size: 20px; }
+        .counters dd { font-size: 15px; }
         .error-message {
-          margin: 12px 0 0;
-          padding: 11px 12px;
-          border-radius: 12px;
+          margin: 8px 0 0;
+          padding: 8px 10px;
+          border-radius: 10px;
           background: #fff0f2;
           color: #9e2436;
-          font-size: 14px;
+          font-size: 13px;
           overflow-wrap: anywhere;
         }
         button {
           width: 100%;
-          min-height: 56px;
-          margin-top: 18px;
+          min-height: 48px;
+          margin-top: 10px;
           border: 0;
-          border-radius: 15px;
+          border-radius: 14px;
           color: #ffffff;
-          font-size: 17px;
+          font-size: 16px;
           font-weight: 800;
           letter-spacing: 0.04em;
           touch-action: manipulation;
@@ -806,28 +777,80 @@ export default function TargetSenderPage() {
         button:disabled { cursor: wait; opacity: 0.65; }
         .start-button { background: #137c5b; }
         .stop-button { background: #c43d4f; }
-        .trace-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .trace-controls {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+          margin-top: 8px;
+        }
         .trace-button {
-          min-height: 44px;
-          margin-top: 10px;
+          min-height: 40px;
+          margin-top: 0;
           border: 1px solid #19718a;
+          border-radius: 12px;
           background: #ffffff;
           color: #19718a;
           font-size: 12px;
+          font-weight: 700;
         }
         .trace-button:disabled { cursor: not-allowed; opacity: 0.5; }
-        .phase-marker-button { min-height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; }
-        .phase-marker-button.is-latest { border-color: #0e7658; background: #0e7658; color: #ffffff; box-shadow: 0 0 0 3px rgba(14, 118, 88, 0.22); font-weight: 800; }
-        .phase-marker-button.is-latest:disabled { opacity: 1; }
-        .phase-marker-badge { padding: 1px 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.2); color: #ffffff; font-size: 11px; }
-        .calibration-help { margin: 8px 0 0; color: #425b63; font-size: 13px; line-height: 1.5; }
-        .calibration-note { margin: 10px 0 0; color: #785a12; font-size: 13px; }
-        .calibration-feedback { margin: 12px 0 0; color: #126543; font-size: 13px; font-weight: 700; }
         .clear-trace-button { border-color: #9e2436; color: #9e2436; }
-        .secure-note { margin: 12px 0 0; color: #708287; font-size: 12px; text-align: center; }
+        .details-drawer {
+          margin-top: 8px;
+          border: 1px dashed #d0dee1;
+          border-radius: 12px;
+          background: #fbfdfd;
+          padding: 6px 10px;
+          font-size: 12px;
+        }
+        .details-drawer summary {
+          cursor: pointer;
+          font-weight: 600;
+          color: #4d7078;
+          user-select: none;
+          outline: none;
+          font-size: 12px;
+        }
+        .details-drawer[open] summary {
+          margin-bottom: 6px;
+          border-bottom: 1px solid #edf3f5;
+          padding-bottom: 4px;
+        }
+        .details-drawer .data-list div {
+          padding: 3px 0;
+        }
+        .details-drawer dt {
+          font-size: 12px;
+        }
+        .details-drawer dd {
+          font-size: 11px;
+        }
+        .secure-note {
+          margin: 8px 0 0;
+          color: #708287;
+          font-size: 11px;
+          text-align: center;
+        }
         @media (max-width: 380px) {
-          .status-grid { grid-template-columns: 1fr; }
-          .sender-card { padding: 20px 14px; }
+          .sender-page {
+            padding: max(8px, env(safe-area-inset-top)) 6px max(10px, env(safe-area-inset-bottom));
+          }
+          .sender-card {
+            padding: 10px 8px;
+            border-radius: 16px;
+          }
+          .panel, .status-box, .run-panel {
+            padding: 6px 8px;
+          }
+          dt, .field-label, .panel h2 {
+            font-size: 12px;
+          }
+          dd {
+            font-size: 12px;
+          }
+          .trace-button {
+            font-size: 11px;
+          }
         }
       `}</style>
     </main>
