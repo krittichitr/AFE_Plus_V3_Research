@@ -10,6 +10,7 @@ import Map, { Marker, MapRef, Source, Layer } from 'react-map-gl/mapbox';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { Map as MapIcon, Layers, Navigation, Compass, ChevronRight, MapPin, Globe } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { m2ResearchQuerySuffix } from '@/lib/research/navigationResearchQuery';
 
 // Ported from Navigation Frontend's components/CustomCompass.tsx (Phase 4C-1).
 // Kept inline here (rather than a new component file) because this phase's
@@ -485,7 +486,7 @@ const Location = () => {
     // Legacy /navigation query template — reused as-is (unchanged derivation)
     // by the Overview "Web Application" / desktop start buttons below, per
     // Phase 4C-1 instructions ("Web Application ยังใช้ Link/query เดิม").
-    const legacyNavigateHref = `/navigation?idlocation=${router.query.idlocation || ''}&users_id=${dataUser.userData?.users_id || ''}&takecare_id=${dataUser.takecareData?.takecare_id || ''}&auToken=${router.query.auToken || ''}`;
+    const legacyNavigateHref = `/navigation?idlocation=${router.query.idlocation || ''}&users_id=${dataUser.userData?.users_id || ''}&takecare_id=${dataUser.takecareData?.takecare_id || ''}&auToken=${router.query.auToken || ''}${m2ResearchQuerySuffix(router.query.m2_research)}`;
     // ════════════════════════════════════════════════════════════════════
     // OVERVIEW (MAPBOX) UI — new primary UI for this page (Phase 4C-1).
     // Ported from afe-navigation-frontend-production/app/overview/page.tsx.

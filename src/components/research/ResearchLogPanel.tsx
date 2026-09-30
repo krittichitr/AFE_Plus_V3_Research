@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore, type RefObject } from 'react
 
 import {
   clearResearchRun,
+  exportM2ResearchJournal,
   exportResearchLog,
   getResearchLoggerSnapshot,
   markVideoSync,
@@ -31,6 +32,9 @@ export default function ResearchLogPanel({
   const [m2ResearchMode, setM2ResearchMode] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [bannerBottom, setBannerBottom] = useState<number | null>(null);
+  const [m2Exporting, setM2Exporting] = useState(false);
+  const [m2ExportResult, setM2ExportResult] = useState<'COMPLETE' | 'INCOMPLETE' | null>(null);
+  const [m2ExportError, setM2ExportError] = useState<string | null>(null);
 
   useEffect(() => {
     // The fixed banner changes height when its instruction or action wraps.
@@ -55,6 +59,30 @@ export default function ResearchLogPanel({
   useEffect(() => {
     if (logger.researchRunId) setRunIdInput(logger.researchRunId);
   }, [logger.researchRunId]);
+
+  useEffect(() => {
+    setM2ExportResult(null);
+    setM2ExportError(null);
+  }, [logger.researchRunId]);
+
+  const handleM2Export = async () => {
+    const exportingRunId = logger.researchRunId;
+    setM2Exporting(true);
+    setM2ExportResult(null);
+    setM2ExportError(null);
+    try {
+      const journal = await exportM2ResearchJournal();
+      if (getResearchLoggerSnapshot().researchRunId !== exportingRunId) return;
+      setM2ExportResult(journal.complete_for_m2 ? 'COMPLETE' : 'INCOMPLETE');
+      if (!journal.complete_for_m2) setM2ExportError('M2 journal incomplete — review the downloaded journal_errors');
+    } catch (error) {
+      if (getResearchLoggerSnapshot().researchRunId === exportingRunId) {
+        setM2ExportError(error instanceof Error ? error.message : 'M2 journal export failed');
+      }
+    } finally {
+      setM2Exporting(false);
+    }
+  };
 
   const statusLabel = logger.status === 'RECORDING'
     ? 'RECORDING'
@@ -101,6 +129,20 @@ export default function ResearchLogPanel({
             <button type="button" disabled={!logger.hasData || logger.status === 'RECORDING'} onClick={exportResearchLog} className="rounded bg-blue-700 px-2 py-1.5 font-semibold text-white disabled:opacity-40">EXPORT LOG</button>
             <button type="button" disabled={logger.status === 'RECORDING'} onClick={() => { clearResearchRun(); setRunIdInput(''); }} className="rounded bg-slate-600 px-2 py-1.5 font-semibold text-white disabled:opacity-40">NEW/CLEAR RUN</button>
           </div>
+          {m2ResearchMode && (
+            <>
+              <button
+                type="button"
+                disabled={logger.status !== 'STOPPED' || (logger.m2Status !== 'STOPPED' && logger.m2Status !== 'INVALID') || m2Exporting}
+                onClick={() => { void handleM2Export(); }}
+                className="mt-1.5 w-full rounded bg-blue-800 px-2 py-1.5 font-semibold text-white disabled:opacity-40"
+              >
+                {m2Exporting ? 'EXPORTING M2 JOURNAL…' : 'EXPORT M2 JOURNAL'}
+              </button>
+              {m2ExportResult && <p role="status" className="mt-1 font-semibold">M2: {m2ExportResult}</p>}
+              {m2ExportError && <p role="alert" className="mt-1 text-red-700">{m2ExportError}</p>}
+            </>
+          )}
           <p className="mt-2">Walking: {logger.walkingState.replace('_', ' ')}{logger.walkingWindowId ? ` · ${logger.walkingWindowId}` : ''}</p>
           <div className="mt-1 grid grid-cols-2 gap-1.5">
             <button type="button" disabled={logger.status !== 'RECORDING' || logger.walkingState !== 'NOT_STARTED'} onClick={startWalkingWindow} className="rounded bg-emerald-700 px-2 py-1.5 font-semibold text-white disabled:opacity-40">START WALKING</button>

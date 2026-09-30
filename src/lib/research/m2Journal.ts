@@ -101,6 +101,18 @@ export async function journalM2Outcome(runId: string, outcome: M2Outcome): Promi
   catch { await markM2RunInvalid(runId, 'outcome_write_failed'); return false; }
 }
 
+/** A stopped run's own capability can read only that run's journal. */
+export async function authorizeM2JournalExport(runId: string, token: string): Promise<boolean> {
+  const store = getClient();
+  if (!store || !token) return false;
+  try {
+    const fields = await store.read(keyFor(runId));
+    return fields.__token === token && Boolean(fields.__start && fields.__stop);
+  } catch {
+    return false;
+  }
+}
+
 export async function readM2Journal(runId: string) {
   const store = getClient();
   if (!store) return {

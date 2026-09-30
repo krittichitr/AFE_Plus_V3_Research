@@ -1,12 +1,12 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { journalM2RunStart, journalM2RunStop, readM2Journal } from '@/lib/research/m2Journal';
+import { authorizeM2JournalExport, journalM2RunStart, journalM2RunStop, readM2Journal } from '@/lib/research/m2Journal';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
   if (req.method === 'POST') {
     const body = req.body as { research_run_id?: unknown; boundary?: unknown; m2_run_token?: unknown; invalid?: unknown } | null;
     const runId = body?.research_run_id;
     const boundary = body?.boundary;
-    if (typeof runId !== 'string' || !runId || runId.length > 200 || (boundary !== 'start' && boundary !== 'stop')) {
+    if (typeof runId !== 'string' || !runId || runId.length > 200 || (boundary !== 'start' && boundary !== 'stop' && boundary !== 'export')) {
       res.status(400).json({ error: 'invalid research boundary' }); return;
     }
     if (boundary === 'start') {
@@ -15,6 +15,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         saved: Boolean(runToken), m2_run_token: runToken,
         integrity_status: runToken ? 'JOURNALED' : 'M2_DURABILITY_NOT_AVAILABLE_OR_RUN_ID_REUSED',
       });
+      return;
+    }
+    if (boundary === 'export') {
+      if (typeof body?.m2_run_token !== 'string' || !await authorizeM2JournalExport(runId, body.m2_run_token)) {
+        res.status(403).json({ error: 'Run authorization unavailable' }); return;
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json(await readM2Journal(runId));
       return;
     }
     if (typeof body?.m2_run_token !== 'string' || !body.m2_run_token) {

@@ -491,4 +491,49 @@ export function exportResearchLog(): void {
   publish();
 }
 
+export async function exportM2ResearchJournal(): Promise<{ research_run_id: string; complete_for_m2: boolean; integrity_status: string }> {
+  const runId = researchRunId;
+  const token = m2RunToken;
+  if (status !== 'STOPPED' || !runId || !token || (m2Status !== 'STOPPED' && m2Status !== 'INVALID')) {
+    throw new Error('Run authorization unavailable: stop the M2 run first');
+  }
+  let response: Response;
+  try {
+    response = await fetch('/api/research/m2-journal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ research_run_id: runId, m2_run_token: token, boundary: 'export' }),
+    });
+  } catch {
+    throw new Error('M2 journal export failed — check the connection and retry');
+  }
+  const journal = await response.json().catch(() => {
+    throw new Error('M2 journal export failed — invalid server response');
+  }) as {
+    research_run_id?: unknown; integrity_status?: unknown; complete_for_m2?: unknown;
+    attempts?: unknown; outcomes?: unknown; journal_errors?: unknown;
+    error?: unknown;
+  };
+  if (researchRunId !== runId || m2RunToken !== token || status !== 'STOPPED') {
+    throw new Error('Run changed during M2 journal export');
+  }
+  if (!response.ok) throw new Error(typeof journal.error === 'string' ? journal.error : 'M2 journal export failed');
+  if (journal.research_run_id !== runId || typeof journal.integrity_status !== 'string'
+    || typeof journal.complete_for_m2 !== 'boolean' || !Array.isArray(journal.attempts)
+    || !Array.isArray(journal.outcomes) || !Array.isArray(journal.journal_errors)) {
+    throw new Error('M2 journal export returned invalid data');
+  }
+  const url = URL.createObjectURL(new Blob([JSON.stringify(journal, null, 2)], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${runId.replace(/[^A-Za-z0-9._-]/g, '_')}-m2-journal.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+  return {
+    research_run_id: runId,
+    complete_for_m2: journal.complete_for_m2,
+    integrity_status: journal.integrity_status,
+  };
+}
+
 export type { ClockSyncResult };
