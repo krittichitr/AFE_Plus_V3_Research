@@ -13,6 +13,8 @@ import type {
   TargetSenderIdentity,
 } from '@/lib/research/targetSender/types';
 import { probeResearchClockSync } from '@/lib/research/clockSync';
+import { startClockSyncSchedule, type ClockSyncSchedule, type ClockSyncRound } from '@/lib/research/clockSyncSchedule';
+import { CALIBRATION_DISTANCE_RULE, DISTANCE_RULE_VERSION, evaluateDistanceSegment, type DistanceSegmentDiagnostic } from '@/lib/research/targetSender/distanceQuality';
 
 type GpsStatus = 'Waiting' | 'Ready' | 'Error';
 
@@ -29,29 +31,76 @@ type TargetSampleTraceRecord = {
   research_run_id: string | null;
   target_sample_id: string;
   sequence: number;
+  callback_index: number;
   target_lat: number;
   target_lng: number;
   accuracy_m: number | null;
+  speed_mps: number | null;
   source_timestamp_ms: number;
   wall_clock_utc: string;
   mono_ms: number;
   cumulative_distance_m: number;
+  raw_cumulative_distance_m: number;
+  validated_cumulative_distance_m: number | null;
+  distance_rule_version: typeof DISTANCE_RULE_VERSION;
+  distance_quality_status: 'CALIBRATION_UNCONFIGURED';
 };
 
 type ClockSyncTraceRecord = {
   event: 'clock_sync';
   sender_session_id: string;
   research_run_id: string | null;
-  server_wall_clock_ms: number | null;
-  client_send_wall_ms: number;
-  client_receive_wall_ms: number;
-  rtt_ms: number;
-  estimated_clock_offset_ms: number | null;
   wall_clock_utc: string;
-  success: boolean;
+  sync_index: number;
+  sync_phase: 'initial' | 'periodic';
+  failure_reason: string | null;
+  [key: string]: unknown;
 };
 
-type TargetTraceRecord = SenderStartTraceRecord | TargetSampleTraceRecord | ClockSyncTraceRecord;
+type ClockSyncIncompleteTraceRecord = {
+  event: 'clock_sync_incomplete';
+  sender_session_id: string;
+  research_run_id: string | null;
+  wall_clock_utc: string;
+  reason: 'STOPPED_WITH_ROUND_IN_FLIGHT';
+} & ClockSyncRound;
+
+type GpsSegmentTraceRecord = {
+  event: 'gps_segment_diagnostic';
+  sender_session_id: string;
+  research_run_id: string | null;
+  wall_clock_utc: string;
+  mono_ms: number;
+} & DistanceSegmentDiagnostic;
+
+type RejectedObservationTraceRecord = {
+  event: 'gps_observation_rejected';
+  sender_session_id: string;
+  research_run_id: string | null;
+  callback_index: number;
+  wall_clock_utc: string;
+  mono_ms: number;
+  target_lat: number | null;
+  target_lng: number | null;
+  accuracy_m: number | null;
+  speed_mps: number | null;
+  source_timestamp_ms: number | null;
+  rejection_reason: 'INVALID_COORDINATE' | 'GEOLOCATION_ERROR';
+  geolocation_error_code?: number;
+};
+
+type CalibrationPhaseTraceRecord = {
+  event: 'calibration_phase';
+  sender_session_id: string;
+  research_run_id: string | null;
+  phase: 'STATIONARY_START' | 'WALK_START' | 'WALK_END' | 'STATIONARY_END';
+  wall_clock_utc: string;
+  mono_ms: number;
+};
+
+type TargetTraceRecord = SenderStartTraceRecord | TargetSampleTraceRecord |
+  ClockSyncTraceRecord | ClockSyncIncompleteTraceRecord | GpsSegmentTraceRecord |
+  RejectedObservationTraceRecord | CalibrationPhaseTraceRecord;
 
 const LOCATION_OPTIONS: PositionOptions = {
   enableHighAccuracy: true,
@@ -128,6 +177,7 @@ export default function TargetSenderPage() {
   const [isStarting, setIsStarting] = useState(false);
   const [latestSample, setLatestSample] = useState<TargetGpsSample | null>(null);
   const [cumulativeDistanceM, setCumulativeDistanceM] = useState(0);
+  const [validatedDistanceM, setValidatedDistanceM] = useState<number | null>(null);
   const [gpsSamples, setGpsSamples] = useState(0);
   const [successfulSends, setSuccessfulSends] = useState(0);
   const [failedSends, setFailedSends] = useState(0);
@@ -145,6 +195,10 @@ export default function TargetSenderPage() {
   const researchRunIdRef = useRef<string | null>(null);
   const targetTraceRef = useRef<TargetTraceRecord[]>([]);
   const cumulativeDistanceRef = useRef(0);
+  const validatedDistanceRef = useRef<number | null>(null);
+  const callbackIndexRef = useRef(0);
+  const interveningRejectedObservationRef = useRef(false);
+  const clockSyncScheduleRef = useRef<ClockSyncSchedule | null>(null);
   const startSampleRef = useRef<TargetGpsSample | null>(null);
   const previousSampleRef = useRef<TargetGpsSample | null>(null);
   const safezoneRef = useRef<TargetSafezone | null>(null);
@@ -153,6 +207,8 @@ export default function TargetSenderPage() {
   const startControllerRef = useRef<AbortController | null>(null);
 
   const stopRuntime = useCallback(() => {
+    clockSyncScheduleRef.current?.stop();
+    clockSyncScheduleRef.current = null;
     activeRef.current = false;
     sessionGenerationRef.current += 1;
     if (watchIdRef.current !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
@@ -166,6 +222,8 @@ export default function TargetSenderPage() {
   }, []);
 
   const stopSending = useCallback(() => {
+    clockSyncScheduleRef.current?.stop();
+    clockSyncScheduleRef.current = null;
     if (activeRef.current && senderSessionIdRef.current) {
       targetTraceRef.current.push(Object.freeze({
         event: 'sender_stop',
@@ -182,17 +240,66 @@ export default function TargetSenderPage() {
 
   useEffect(() => () => stopRuntime(), [stopRuntime]);
 
-  const recordSenderClockSync = useCallback((senderSessionId: string) => {
-    void probeResearchClockSync().then((result) => {
-      targetTraceRef.current.push(Object.freeze({
-        event: 'clock_sync',
-        sender_session_id: senderSessionId,
-        research_run_id: researchRunIdRef.current,
-        ...result,
-        wall_clock_utc: new Date().toISOString(),
-      }));
-      setTraceRecordCount(targetTraceRef.current.length);
+  const beginSenderClockSync = useCallback((
+    senderSessionId: string,
+    capturedRunId: string | null,
+    sessionGeneration: number,
+  ) => {
+    clockSyncScheduleRef.current?.stop();
+    clockSyncScheduleRef.current = startClockSyncSchedule({
+      probe: probeResearchClockSync,
+      record: (round, result, failureReason) => {
+        if (!activeRef.current || sessionGenerationRef.current !== sessionGeneration ||
+            senderSessionIdRef.current !== senderSessionId) return;
+        targetTraceRef.current.push(Object.freeze({
+          event: 'clock_sync',
+          sender_session_id: senderSessionId,
+          research_run_id: capturedRunId,
+          ...round,
+          ...(result ?? {
+            success: false,
+            server_wall_clock_ms: null,
+            client_send_wall_ms: null,
+            client_receive_wall_ms: null,
+            rtt_ms: null,
+            estimated_clock_offset_ms: null,
+            selected_probe_index: null,
+            selected_rtt_ms: null,
+            estimated_offset_ms: null,
+            subprobes: [],
+          }),
+          failure_reason: failureReason ?? (result && !result.success ? 'ALL_PROBES_FAILED' : null),
+          wall_clock_utc: new Date().toISOString(),
+        }));
+        setTraceRecordCount(targetTraceRef.current.length);
+      },
+      recordIncomplete: (round) => {
+        if (!activeRef.current || sessionGenerationRef.current !== sessionGeneration ||
+            senderSessionIdRef.current !== senderSessionId) return;
+        targetTraceRef.current.push(Object.freeze({
+          event: 'clock_sync_incomplete',
+          sender_session_id: senderSessionId,
+          research_run_id: capturedRunId,
+          ...round,
+          reason: 'STOPPED_WITH_ROUND_IN_FLIGHT',
+          wall_clock_utc: new Date().toISOString(),
+        }));
+        setTraceRecordCount(targetTraceRef.current.length);
+      },
     });
+  }, []);
+
+  const recordCalibrationPhase = useCallback((phase: CalibrationPhaseTraceRecord['phase']) => {
+    if (!activeRef.current || !senderSessionIdRef.current) return;
+    targetTraceRef.current.push(Object.freeze({
+      event: 'calibration_phase',
+      sender_session_id: senderSessionIdRef.current,
+      research_run_id: researchRunIdRef.current,
+      phase,
+      wall_clock_utc: new Date().toISOString(),
+      mono_ms: performance.now(),
+    }));
+    setTraceRecordCount(targetTraceRef.current.length);
   }, []);
 
   const queueSend = useCallback((
@@ -267,6 +374,10 @@ export default function TargetSenderPage() {
 
       safezoneRef.current = safezone;
       sequenceRef.current = 0;
+      callbackIndexRef.current = 0;
+      interveningRejectedObservationRef.current = false;
+      validatedDistanceRef.current = null;
+      setValidatedDistanceM(null);
       startSampleRef.current = null;
       previousSampleRef.current = null;
       sendQueueRef.current = Promise.resolve();
@@ -288,15 +399,32 @@ export default function TargetSenderPage() {
         wall_clock_utc: new Date().toISOString(),
       }));
       setTraceRecordCount(targetTraceRef.current.length);
-      recordSenderClockSync(senderSessionId);
+      beginSenderClockSync(senderSessionId, researchRunId, sessionGeneration);
 
       const watchId = navigator.geolocation.watchPosition(
         (position) => {
           if (!activeRef.current || sessionGenerationRef.current !== sessionGeneration) return;
 
+          callbackIndexRef.current += 1;
           const nextSequence = sequenceRef.current + 1;
           const sample = sampleFromPosition(position, senderSessionId, nextSequence);
           if (!sample) {
+            interveningRejectedObservationRef.current = true;
+            targetTraceRef.current.push(Object.freeze({
+              event: 'gps_observation_rejected',
+              sender_session_id: senderSessionId,
+              research_run_id: researchRunId,
+              callback_index: callbackIndexRef.current,
+              wall_clock_utc: new Date().toISOString(),
+              mono_ms: performance.now(),
+              target_lat: Number.isFinite(position.coords.latitude) ? position.coords.latitude : null,
+              target_lng: Number.isFinite(position.coords.longitude) ? position.coords.longitude : null,
+              accuracy_m: gpsValue(position.coords.accuracy),
+              speed_mps: gpsValue(position.coords.speed),
+              source_timestamp_ms: Number.isFinite(position.timestamp) ? position.timestamp : null,
+              rejection_reason: 'INVALID_COORDINATE',
+            }));
+            setTraceRecordCount(targetTraceRef.current.length);
             setGpsStatus('Error');
             setLastError('ได้รับพิกัด GPS ที่ไม่ถูกต้อง');
             return;
@@ -312,8 +440,28 @@ export default function TargetSenderPage() {
             nextCumulativeDistanceM += segmentM;
             cumulativeDistanceRef.current = nextCumulativeDistanceM;
             setCumulativeDistanceM(nextCumulativeDistanceM);
+            const diagnostic = evaluateDistanceSegment({
+              from: previous,
+              to: sample,
+              rawCumulativeDistanceM: nextCumulativeDistanceM,
+              previousValidatedDistanceM: validatedDistanceRef.current,
+              startupReady: false,
+              interveningRejectedObservation: interveningRejectedObservationRef.current,
+              rule: CALIBRATION_DISTANCE_RULE,
+            });
+            validatedDistanceRef.current = diagnostic.validated_cumulative_distance_m;
+            setValidatedDistanceM(diagnostic.validated_cumulative_distance_m);
+            targetTraceRef.current.push(Object.freeze({
+              event: 'gps_segment_diagnostic',
+              sender_session_id: senderSessionId,
+              research_run_id: researchRunId,
+              ...diagnostic,
+              wall_clock_utc: new Date().toISOString(),
+              mono_ms: performance.now(),
+            }));
           }
           previousSampleRef.current = sample;
+          interveningRejectedObservationRef.current = false;
 
           targetTraceRef.current.push(Object.freeze({
             event: 'target_sample',
@@ -321,13 +469,19 @@ export default function TargetSenderPage() {
             research_run_id: researchRunIdRef.current,
             target_sample_id: sample.targetSampleId,
             sequence: sample.sequence,
+            callback_index: callbackIndexRef.current,
             target_lat: sample.latitude,
             target_lng: sample.longitude,
             accuracy_m: sample.accuracy,
+            speed_mps: sample.speed,
             source_timestamp_ms: sample.sourceTimestamp,
             wall_clock_utc: new Date().toISOString(),
             mono_ms: performance.now(),
             cumulative_distance_m: nextCumulativeDistanceM,
+            raw_cumulative_distance_m: nextCumulativeDistanceM,
+            validated_cumulative_distance_m: validatedDistanceRef.current,
+            distance_rule_version: DISTANCE_RULE_VERSION,
+            distance_quality_status: 'CALIBRATION_UNCONFIGURED',
           }));
           setTraceRecordCount(targetTraceRef.current.length);
 
@@ -340,8 +494,26 @@ export default function TargetSenderPage() {
         },
         (error) => {
           if (!activeRef.current || sessionGenerationRef.current !== sessionGeneration) return;
+          callbackIndexRef.current += 1;
+          interveningRejectedObservationRef.current = true;
+          targetTraceRef.current.push(Object.freeze({
+            event: 'gps_observation_rejected',
+            sender_session_id: senderSessionId,
+            research_run_id: researchRunId,
+            callback_index: callbackIndexRef.current,
+            wall_clock_utc: new Date().toISOString(),
+            mono_ms: performance.now(),
+            target_lat: null,
+            target_lng: null,
+            accuracy_m: null,
+            speed_mps: null,
+            source_timestamp_ms: null,
+            rejection_reason: 'GEOLOCATION_ERROR',
+            geolocation_error_code: error.code,
+          }));
+          setTraceRecordCount(targetTraceRef.current.length);
           setGpsStatus('Error');
-          setLastError(`GPS error (${error.code}): ${error.message}`);
+          setLastError('GPS error (' + error.code + '): ' + error.message);
         },
         LOCATION_OPTIONS,
       );
@@ -350,7 +522,7 @@ export default function TargetSenderPage() {
       setIsSending(true);
     } catch (error) {
       if (!isAbortError(error)) {
-        activeRef.current = false;
+        stopRuntime();
         setGpsStatus('Error');
         setLastError(errorMessage(error));
       }
@@ -360,14 +532,14 @@ export default function TargetSenderPage() {
       }
       setIsStarting(false);
     }
-  }, [identity, isStarting, queueSend, recordSenderClockSync, researchRunIdInput]);
+  }, [identity, isStarting, queueSend, beginSenderClockSync, researchRunIdInput, stopRuntime]);
 
   const coordinateText = (value: number | null | undefined, digits: number): string =>
     typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—';
 
   const exportTargetTrace = useCallback(() => {
     const senderSessionId = senderSessionIdRef.current;
-    if (!senderSessionId || targetTraceRef.current.length === 0) return;
+    if (activeRef.current || !senderSessionId || targetTraceRef.current.length === 0) return;
     const jsonl = `${targetTraceRef.current.map((record) => JSON.stringify(record)).join('\n')}\n`;
     const url = URL.createObjectURL(new Blob([jsonl], { type: 'application/x-ndjson' }));
     const link = document.createElement('a');
@@ -378,6 +550,9 @@ export default function TargetSenderPage() {
   }, []);
 
   const clearTargetTrace = useCallback(() => {
+    if (activeRef.current) return;
+    clockSyncScheduleRef.current?.stop();
+    clockSyncScheduleRef.current = null;
     targetTraceRef.current = [];
     setTraceRecordCount(0);
   }, []);
@@ -432,9 +607,13 @@ export default function TargetSenderPage() {
         </section>
 
         <section className="panel movement-panel">
-          <h2>Movement</h2>
-          <span>Distance from Start</span>
+          <h2>Movement Evidence</h2>
+          <span>Raw GPS Distance</span>
           <strong>{cumulativeDistanceM.toFixed(1)} m</strong>
+          <span>Validated Distance</span>
+          <strong>{validatedDistanceM === null ? 'NOT CONFIGURED' : validatedDistanceM.toFixed(1) + ' m'}</strong>
+          <span>Distance Quality</span>
+          <strong>CALIBRATION</strong>
         </section>
 
         <section className="panel">
@@ -457,11 +636,21 @@ export default function TargetSenderPage() {
           {isStarting ? 'STARTING…' : isSending ? 'STOP SENDING' : 'START SENDING'}
         </button>
 
+        <section className="panel">
+          <h2>Calibration Phase Markers</h2>
+          <div className="trace-controls">
+            <button type="button" className="trace-button" disabled={!isSending} onClick={() => recordCalibrationPhase('STATIONARY_START')}>STATIONARY START</button>
+            <button type="button" className="trace-button" disabled={!isSending} onClick={() => recordCalibrationPhase('WALK_START')}>WALK START</button>
+            <button type="button" className="trace-button" disabled={!isSending} onClick={() => recordCalibrationPhase('WALK_END')}>WALK END</button>
+            <button type="button" className="trace-button" disabled={!isSending} onClick={() => recordCalibrationPhase('STATIONARY_END')}>STATIONARY END</button>
+          </div>
+        </section>
+
         <div className="trace-controls">
-          <button type="button" className="trace-button" disabled={traceRecordCount === 0} onClick={exportTargetTrace}>
+          <button type="button" className="trace-button" disabled={traceRecordCount === 0 || isSending || isStarting} onClick={exportTargetTrace}>
             EXPORT TARGET TRACE
           </button>
-          <button type="button" className="trace-button clear-trace-button" disabled={traceRecordCount === 0} onClick={clearTargetTrace}>
+          <button type="button" className="trace-button clear-trace-button" disabled={traceRecordCount === 0 || isSending || isStarting} onClick={clearTargetTrace}>
             CLEAR TRACE
           </button>
         </div>

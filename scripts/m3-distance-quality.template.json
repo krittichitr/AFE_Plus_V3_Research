@@ -1,0 +1,10 @@
+{
+  "schema": "m3-distance-quality-config-v1",
+  "distance_rule_version": "m3-distance-quality-v1",
+  "max_accuracy_m": null,
+  "max_speed_mps": null,
+  "min_source_delta_ms": null,
+  "max_source_gap_ms": null,
+  "stationary_deadband_m": null,
+  "startup_ready_rule": null
+}

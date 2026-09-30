@@ -11,6 +11,7 @@
 //     --manifest <manifest.json> --criteria <criteria.json> [--table]
 import { readFileSync } from 'node:fs';
 import { haversineMeters, isValidLatLng } from './m3-haversine.mjs';
+import { summarizeM3Calibration } from './m3-calibration-core.mjs';
 
 export const CHECKPOINTS = [0, 50, 100, 150, 200, 300, 500];
 export const VALID_SYSTEMS = ['AFE-Plus V.2', 'D-TANS'];
@@ -19,7 +20,7 @@ export const PROTOCOL_VERSION = 'M3-PROTOCOL-V1';
 const RUN_INVALIDATING_STATUSES = new Set([
   'RUN_ID_MISMATCH', 'NAVIGATION_SESSION_MISMATCH', 'SENDER_SESSION_MISMATCH',
   'DUPLICATE_TARGET_SAMPLE_ID', 'INCOMPLETE_NAVIGATION_LOG', 'INCOMPLETE_SENDER_LOG',
-  'PROTOCOL_ERROR',
+  'PROTOCOL_ERROR', 'DISTANCE_RULE_MISMATCH', 'DISTANCE_DIAGNOSTIC_INVALID',
 ]);
 
 // ─── JSONL / JSON loading ───────────────────────────────────────────────────
@@ -55,6 +56,10 @@ export function validateManifest(manifest) {
     if (typeof manifest[key] !== 'string' || !manifest[key]) errors.push(`missing_${key}`);
   }
   if (!VALID_SYSTEMS.includes(manifest.system)) errors.push('invalid_system');
+  if (manifest.distance_rule_version !== undefined &&
+      (typeof manifest.distance_rule_version !== 'string' || !manifest.distance_rule_version)) {
+    errors.push('invalid_distance_rule_version');
+  }
   return { valid: errors.length === 0, errors };
 }
 
@@ -438,7 +443,8 @@ function buildBlockedResult({ status, reason, manifest, extraIssues, nav, sender
 
 // ─── Top-level entry point ───────────────────────────────────────────────────
 
-export function analyzeRun({ navigationEvents, senderEvents, manifest, criteria }) {
+// Synthetic/legacy compatibility path for controlled tests only; the CLI uses analyzeRun below.
+export function analyzeLegacyRunForCompatibility({ navigationEvents, senderEvents, manifest, criteria }) {
   const manifestCheck = validateManifest(manifest);
   if (!manifestCheck.valid) {
     return buildBlockedResult({ status: 'PROTOCOL_ERROR', reason: manifestCheck.errors.join(';'), manifest, extraIssues: manifestCheck.errors.map((e) => `PROTOCOL_ERROR:${e}`) });
@@ -495,6 +501,68 @@ export function analyzeRun({ navigationEvents, senderEvents, manifest, criteria 
   return { manifest_issues: issues, results, summary: buildSummary(manifest, results, null) };
 }
 
+// Phase B official entry point: calibration diagnostics are readable, but no
+// validated distance or event-specific clock-anchor policy is locked yet.
+export function analyzeRun({ navigationEvents, senderEvents, manifest, criteria }) {
+  const calibration = summarizeM3Calibration({ navigationEvents, senderEvents, manifest });
+  const attach = (result) => ({ ...result, calibration_diagnostics: calibration });
+  const manifestCheck = validateManifest(manifest);
+  if (!manifestCheck.valid) {
+    return attach(buildBlockedResult({
+      status: 'PROTOCOL_ERROR', reason: manifestCheck.errors.join(';'), manifest,
+      extraIssues: manifestCheck.errors.map((error) => 'PROTOCOL_ERROR:' + error),
+    }));
+  }
+  const nav = loadNavigationLog(navigationEvents, manifest);
+  const sender = loadSenderTrace(senderEvents, manifest);
+  const issues = [...nav.issues, ...sender.issues];
+  for (const status of [
+    'RUN_ID_MISMATCH', 'NAVIGATION_SESSION_MISMATCH', 'SENDER_SESSION_MISMATCH',
+    'DUPLICATE_TARGET_SAMPLE_ID', 'INCOMPLETE_NAVIGATION_LOG', 'INCOMPLETE_SENDER_LOG',
+  ]) {
+    const hit = issues.find((issue) => issue.startsWith(status));
+    if (hit) return attach(buildBlockedResult({ status, reason: hit, manifest, extraIssues: issues, nav, sender }));
+  }
+  if (calibration.distance_rule_match === 'MISMATCH' ||
+      calibration.distance_rule_match === 'MANIFEST_VERSION_MISSING' ||
+      (manifest.distance_rule_version && manifest.distance_rule_version !== 'm3-distance-quality-v1')) {
+    return attach(buildBlockedResult({
+      status: 'DISTANCE_RULE_MISMATCH',
+      reason: 'sender_manifest_analyzer_rule_versions_do_not_agree',
+      manifest, extraIssues: issues, nav, sender,
+    }));
+  }
+  if (calibration.gps.diagnostic_consistency_issues.length > 0) {
+    return attach(buildBlockedResult({
+      status: 'DISTANCE_DIAGNOSTIC_INVALID',
+      reason: calibration.gps.diagnostic_consistency_issues.join(';'),
+      manifest, extraIssues: issues, nav, sender,
+    }));
+  }
+  const criteriaCheck = validateCriteria(criteria);
+  if (!criteriaCheck.valid) {
+    return attach(buildBlockedResult({
+      status: 'CLOCK_SYNC_CRITERIA_MISSING',
+      reason: 'criteria_file_missing_or_invalid',
+      manifest, extraIssues: issues, nav, sender,
+    }));
+  }
+  if (calibration.gps.format !== 'distance_diagnostics_v1' ||
+      calibration.gps.validated_cumulative_distance_m === null ||
+      calibration.gps.validation_status_counts.CALIBRATION_UNCONFIGURED) {
+    return attach(buildBlockedResult({
+      status: 'DISTANCE_QUALITY_UNCONFIGURED',
+      reason: 'validated_checkpoint_distance_not_locked',
+      manifest, extraIssues: issues, nav, sender,
+    }));
+  }
+  return attach(buildBlockedResult({
+    status: 'CLOCK_SYNC_POLICY_UNCONFIGURED',
+    reason: 'multiple_anchors_present_but_final_drift_and_anchor_policy_not_locked',
+    manifest, extraIssues: issues, nav, sender,
+  }));
+}
+
 // ─── CLI ──────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
@@ -533,7 +601,7 @@ async function main() {
   const result = analyzeRun({ navigationEvents, senderEvents, manifest, criteria });
   if (args.table) printTable(result.results);
   console.log(JSON.stringify(result, null, 2));
-  process.exitCode = result.summary.run_validity === 'INVALID' ? 1 : 0;
+  process.exitCode = result.summary.run_validity === 'VALID' ? 0 : 1;
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

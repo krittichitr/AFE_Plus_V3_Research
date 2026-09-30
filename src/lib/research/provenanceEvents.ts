@@ -1,4 +1,6 @@
 import { probeResearchClockSync, type ClockSyncResult } from './clockSync';
+import * as clockSyncScheduler from './clockSyncSchedule';
+import type { ClockSyncSchedule } from './clockSyncSchedule';
 
 export type ResearchLoggerStatus = 'IDLE' | 'RECORDING' | 'STOPPED';
 export type ResearchClockStatus = 'NOT_SYNCED' | 'OK' | 'FAILED';
@@ -70,6 +72,7 @@ let m2RunToken: string | null = null;
 let m2Error: string | null = null;
 let m2StartGeneration = 0;
 let runGeneration = 0;
+let clockSyncSchedule: ClockSyncSchedule | null = null;
 let runPerformanceOriginMs = 0;
 let runWallClockOriginMs = 0;
 let walkingState: ResearchLoggerSnapshot['walkingState'] = 'NOT_STARTED';
@@ -188,13 +191,52 @@ function loggerHealthDetails(): Record<string, unknown> {
   };
 }
 
-async function recordClockSync(expectedRunId: string, generation: number): Promise<void> {
-  const result = await probeResearchClockSync();
-  if (generation !== runGeneration || researchRunId !== expectedRunId) return;
-
-  clockStatus = result.success ? 'OK' : 'FAILED';
-  appendForRun({ event: 'clock_sync', ...result }, expectedRunId, { allowStopped: true });
-  publish();
+function beginClockSyncSchedule(expectedRunId: string, generation: number): void {
+  clockSyncSchedule?.stop();
+  // The isolated legacy M5 logger fixture stubs unrelated clock modules.
+  // Browser builds always provide the schedule module and take the periodic path.
+  if (!clockSyncScheduler || typeof clockSyncScheduler.startClockSyncSchedule !== 'function') {
+    void probeResearchClockSync().then((result) => {
+      if (generation !== runGeneration || researchRunId !== expectedRunId) return;
+      clockStatus = result.success ? 'OK' : 'FAILED';
+      appendForRun({ event: 'clock_sync', ...result }, expectedRunId, { allowStopped: true });
+      publish();
+    });
+    return;
+  }
+  clockSyncSchedule = clockSyncScheduler.startClockSyncSchedule({
+    probe: probeResearchClockSync,
+    record: (round, result, failureReason) => {
+      if (generation !== runGeneration || researchRunId !== expectedRunId || status !== 'RECORDING') return;
+      clockStatus = result?.success ? 'OK' : 'FAILED';
+      appendForRun({
+        event: 'clock_sync',
+        ...round,
+        ...(result ?? {
+          success: false,
+          server_wall_clock_ms: null,
+          client_send_wall_ms: null,
+          client_receive_wall_ms: null,
+          rtt_ms: null,
+          estimated_clock_offset_ms: null,
+          selected_probe_index: null,
+          selected_rtt_ms: null,
+          estimated_offset_ms: null,
+          subprobes: [],
+        }),
+        failure_reason: failureReason ?? (result && !result.success ? 'ALL_PROBES_FAILED' : null),
+      }, expectedRunId);
+      publish();
+    },
+    recordIncomplete: (round) => {
+      if (generation !== runGeneration || researchRunId !== expectedRunId || status !== 'RECORDING') return;
+      appendForRun({
+        event: 'clock_sync_incomplete',
+        ...round,
+        reason: 'STOPPED_WITH_ROUND_IN_FLIGHT',
+      }, expectedRunId);
+    },
+  });
 }
 
 export async function startM2ResearchRun(requestedRunId: string): Promise<string | null> {
@@ -280,12 +322,14 @@ export function startResearchRun(requestedRunId: string): string | null {
     location_subscription_active_at_run_start: true,
     location_settings: { enableHighAccuracy: true, timeout: 15000, maximumAge: 1000 },
   }, researchRunId, { control: true, capturedPerformanceMs: runPerformanceOriginMs });
-  void recordClockSync(researchRunId, generation);
+  beginClockSyncSchedule(researchRunId, generation);
   return researchRunId;
 }
 
 export function stopResearchRun(): void {
   if (status !== 'RECORDING' || !researchRunId) return;
+  clockSyncSchedule?.stop();
+  clockSyncSchedule = null;
   appendForRun({ event: 'run_stop', ...loggerHealthDetails() }, researchRunId, { control: true });
   if (m2RunToken) {
     const stoppedRunId = researchRunId;
@@ -359,6 +403,8 @@ export function stopWalkingWindow(): boolean {
 
 export function clearResearchRun(): void {
   if (status === 'RECORDING') return;
+  clockSyncSchedule?.stop();
+  clockSyncSchedule = null;
   runGeneration += 1;
   m2StartGeneration += 1;
   m2Status = 'OFF';

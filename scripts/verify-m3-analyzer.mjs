@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
-import { analyzeRun, parseJsonl, validateManifest, validateCriteria, CHECKPOINTS } from './analyze-m3.mjs';
+import { analyzeLegacyRunForCompatibility, parseJsonl, validateManifest, validateCriteria, CHECKPOINTS } from './analyze-m3.mjs';
 import { haversineMeters, EARTH_RADIUS_M, isValidLatLng } from './m3-haversine.mjs';
 
 const root = resolve(import.meta.dirname, '..');
@@ -110,7 +110,7 @@ function baseCriteria() {
 }
 
 function run(overrides = {}) {
-  return analyzeRun({
+  return analyzeLegacyRunForCompatibility({
     navigationEvents: overrides.navigationEvents ?? buildNav(overrides.nav),
     senderEvents: overrides.senderEvents ?? buildSender(overrides.sender),
     manifest: overrides.manifest ?? baseManifest(),
