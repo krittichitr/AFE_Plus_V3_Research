@@ -1,0 +1,20 @@
+{
+  "schema_version": "m3-manifest-v2",
+  "protocol_version": "M3-PROTOCOL-V2",
+  "system": "<AFE-Plus V.2 or D-TANS>",
+  "navigation": {
+    "file": "<explicit Navigation JSONL path; relative to this manifest>",
+    "session_id": "<selected Navigation session>",
+    "run_id_label": "<original Navigation label; descriptive only>"
+  },
+  "sender": {
+    "file": "<explicit Sender JSONL path; relative to this manifest>",
+    "sender_session_id": "<intended Sender session>",
+    "run_id_label": "<original Sender label; descriptive only>"
+  },
+  "analysis_scope": {
+    "policy": "single_continuous_navigation_session",
+    "end_policy": "run_stop"
+  },
+  "observation_start_policy": "linkage_ready_plus_configured_startup_stabilization"
+}

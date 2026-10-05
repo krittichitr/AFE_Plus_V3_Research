@@ -12,6 +12,12 @@
     "test:research-m4-m5": "node scripts/verify-m4-m5-instrumentation.mjs",
     "test:research-m4": "node scripts/verify-m4-analyzer.mjs",
     "test:research-m3": "node scripts/verify-m3-analyzer.mjs",
+    "test:research-m3:v2": "node scripts/verify-m3-v2-analyzer.mjs",
+    "analyze:research-m3:v2": "node scripts/analyze-m3-v2.mjs",
+    "test:research-m3:legacy-v1": "node scripts/verify-m3-analyzer.mjs",
+    "analyze:research-m3:legacy-v1": "node scripts/analyze-m3.mjs",
+    "analyze:research-m3:calibration": "node scripts/analyze-m3-calibration.mjs",
+    "test:research-m3:calibration": "node scripts/verify-m3-calibration-analyzer.mjs && node scripts/verify-m3-calibration-instrumentation.mjs",
     "test:research-m5": "node scripts/verify-m5-video-sync.mjs && node scripts/verify-m5-analyzer.mjs"
   },
   "dependencies": {

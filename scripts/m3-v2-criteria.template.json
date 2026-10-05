@@ -1,0 +1,10 @@
+{
+  "schema_version": "m3-criteria-v2",
+  "protocol_version": "M3-PROTOCOL-V2",
+  "criteria_id": null,
+  "observation_interval_ms": null,
+  "max_sample_freshness_age_ms": null,
+  "gps_quality_policy": null,
+  "startup_stabilization_policy": null,
+  "unresolved_gps_gap_policy": null
+}
