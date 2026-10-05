@@ -1,5 +1,5 @@
 import type { BackendResearchEvent, NavigationManeuver, RouteProvenance } from '@/lib/navigation/types';
-import { appendBackendResearchEvents } from '@/lib/research/provenanceEvents';
+import { appendBackendResearchEvents, appendResearchObservationAt, getRecordingResearchRunId } from '@/lib/research/provenanceEvents';
 
 export interface LatLng {
   lat: number;
@@ -191,6 +191,16 @@ export class NavigationService {
         }),
         signal,
       });
+      const receivedAt = performance.now();
+      if (routeProvenance?.research_run_id === getRecordingResearchRunId()) {
+        appendResearchObservationAt({
+          event: 'route_update_received',
+          session_id: sessionId,
+          route_update_id: routeProvenance.route_update_id,
+          http_status: res.status,
+          outcome: 'http_response_available',
+        }, receivedAt);
+      }
       const researchRunId = routeProvenance?.research_run_id ?? null;
 
       if (res.status === 404) {

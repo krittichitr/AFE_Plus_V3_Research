@@ -152,6 +152,40 @@ function syncMapping(rows, annotation, window, c, result) {
   };
 }
 
+const routeMilestones = [
+  'route_update_received', 'route_frontend_accepted', 'route_render_command_completed',
+];
+
+function routeContext(rows, span) {
+  // Full-run nearest neighbors, with explicit deltas; no unapproved association window or causal inference.
+  const describe = (row) => row ? {
+    event_seq: row.event_seq,
+    monotonic_us: row.monotonic_us,
+    session_id: row.session_id ?? null,
+    route_update_id: row.route_update_id ?? null,
+    route_version: row.route_version ?? null,
+    route_source_key: row.route_source_key ?? null,
+    route_signature: row.route_signature ?? null,
+    outcome: row.outcome ?? null,
+    completion_kind: row.completion_kind ?? null,
+    visible_render_confirmed: row.visible_render_confirmed ?? null,
+    delta_to_stall_start_ms: (row.monotonic_us - span[0]) / 1000,
+    delta_to_episode_end_ms: (row.monotonic_us - span[1]) / 1000,
+  } : null;
+  return Object.fromEntries(routeMilestones.map((event) => {
+    const matching = rows.filter((row) => row.event === event);
+    const before = matching.filter((row) => row.monotonic_us < span[0]).at(-1) ?? null;
+    const inside = matching.filter((row) => row.monotonic_us >= span[0] && row.monotonic_us <= span[1]);
+    const after = matching.find((row) => row.monotonic_us > span[1]) ?? null;
+    return [event, {
+      nearest_before: describe(before),
+      inside_count: inside.length,
+      nearest_inside: describe(inside[0] ?? null),
+      nearest_after: describe(after),
+    }];
+  }));
+}
+
 function episodeSupport(rows, span) {
   // Diagnostic neighborhood only: one second either side in the run monotonic domain.
   const nearby = rows.filter((x) => x.monotonic_us >= span[0] - 1_000_000 && x.monotonic_us <= span[1] + 1_000_000);
@@ -165,6 +199,8 @@ function episodeSupport(rows, span) {
     nearby_marker_command_ids: commands.map((x) => x.marker_command_id ?? x.marker_request_id).filter((x) => x != null),
     marker_command_outcomes: commands.map((x) => x.event),
     camera_context_summary: [...new Set([...motion, ...commands].map((x) => `${x.camera_mode ?? 'unknown'}:${x.camera_following ?? 'unknown'}`))],
+    route_context_basis: 'nearest_full_run_milestones_no_causal_claim',
+    route_context: routeContext(rows, span),
   };
 }
 
@@ -207,7 +243,7 @@ export function analyzeM5({ rows, annotation, manifest, criteria, videoExists = 
     if (!health || !Number.isInteger(health.dropped_events)) fail('INCOMPLETE_LOG', 'logger health invalid');
     out.logger_health_status = health.dropped_events ? `DROPPED:${health.dropped_events}` : 'OK';
     if (health.dropped_events) {
-      const essential = ['video_sync_marker', 'walking_window_start', 'walking_window_stop', 'lifecycle_state_changed', 'lifecycle_visibility_changed', 'lifecycle_page_hidden', 'lifecycle_page_shown', 'raw_location_received', 'agent_motion_computed'];
+      const essential = ['video_sync_marker', 'walking_window_start', 'walking_window_stop', 'lifecycle_state_changed', 'lifecycle_visibility_changed', 'lifecycle_page_hidden', 'lifecycle_page_shown', 'raw_location_received', 'agent_motion_computed', ...routeMilestones];
       const impacts = criteria.dropped_event_rule === 'invalidate_any_drop'
         || !health.dropped_by_event || essential.some((key) => Number(health.dropped_by_event[key] ?? 0) > 0);
       if (impacts) fail('DROPPED_EVENTS', 'dropped required run/sync/walking/lifecycle/supporting evidence');

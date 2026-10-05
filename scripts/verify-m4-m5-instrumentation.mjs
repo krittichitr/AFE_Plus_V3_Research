@@ -6,6 +6,8 @@ const logger = readFileSync(
   new URL('../src/lib/research/provenanceEvents.ts', import.meta.url),
   'utf8',
 );
+const navigationService = readFileSync(new URL('../src/lib/services/navigation.service.ts', import.meta.url), 'utf8');
+const navigationHook = readFileSync(new URL('../src/hooks/useNavigation.tsx', import.meta.url), 'utf8');
 
 assert.equal(
   (navigation.match(/navigator\.geolocation\.watchPosition\(/g) ?? []).length,
@@ -26,6 +28,10 @@ assert.match(logger, /const MAX_EVENTS = 100_000/);
 assert.match(logger, /dropped_by_event/);
 assert.match(logger, /export function buildResearchJsonl/);
 assert.match(logger, /status === 'RECORDING'\) return null/);
+assert.match(navigationService, /const res = await fetch\(url,[\s\S]*?const receivedAt = performance\.now\(\);\s*if \(routeProvenance\?\.research_run_id === getRecordingResearchRunId\(\)\) \{\s*appendResearchObservationAt\(\{\s*event: 'route_update_received'/);
+assert.match(navigationHook, /if \(m5PathAccepted\) \{[\s\S]*?event: 'route_frontend_accepted'/);
+assert.match(navigation, /source\.setData\(geojson\);[\s\S]*?event: 'route_render_command_completed'/);
+assert.match(navigation, /completion_kind: 'mapbox_geojson_source_setData_return',[\s\S]*?visible_render_confirmed: false/);
 
 const fixture = [
   { event: 'raw_location_received', location_sample_id: 10, monotonic_us: 1000000 },

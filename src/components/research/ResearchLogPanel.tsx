@@ -143,10 +143,10 @@ export default function ResearchLogPanel({
               {m2ExportError && <p role="alert" className="mt-1 text-red-700">{m2ExportError}</p>}
             </>
           )}
-          <p className="mt-2">Walking: {logger.walkingState.replace('_', ' ')}{logger.walkingWindowId ? ` · ${logger.walkingWindowId}` : ''}</p>
+          <p className="mt-2">Movement: {logger.walkingState.replace('_', ' ')}{logger.walkingWindowId ? ` · ${logger.walkingWindowId}` : ''}</p>
           <div className="mt-1 grid grid-cols-2 gap-1.5">
-            <button type="button" disabled={logger.status !== 'RECORDING' || logger.walkingState !== 'NOT_STARTED'} onClick={startWalkingWindow} className="rounded bg-emerald-700 px-2 py-1.5 font-semibold text-white disabled:opacity-40">START WALKING</button>
-            <button type="button" disabled={logger.status !== 'RECORDING' || logger.walkingState !== 'ACTIVE'} onClick={stopWalkingWindow} className="rounded bg-amber-600 px-2 py-1.5 font-semibold text-white disabled:opacity-40">STOP WALKING</button>
+            <button type="button" disabled={logger.status !== 'RECORDING' || logger.walkingState !== 'NOT_STARTED'} onClick={startWalkingWindow} className="rounded bg-emerald-700 px-2 py-1.5 font-semibold text-white disabled:opacity-40">START MOVEMENT</button>
+            <button type="button" disabled={logger.status !== 'RECORDING' || logger.walkingState !== 'ACTIVE'} onClick={stopWalkingWindow} className="rounded bg-amber-600 px-2 py-1.5 font-semibold text-white disabled:opacity-40">STOP MOVEMENT</button>
           </div>
           <button type="button" disabled={logger.status !== 'RECORDING'} onClick={markVideoSync} className="mt-2 rounded bg-violet-700 px-2 py-1.5 font-semibold text-white disabled:opacity-40">VIDEO SYNC</button>
           {logger.videoSyncId && <div aria-live="polite" className="mt-1 break-all rounded border-2 border-violet-700 bg-white p-1 font-mono text-sm font-bold text-violet-950">SYNC {logger.videoSyncId}</div>}

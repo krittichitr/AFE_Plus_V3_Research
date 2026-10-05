@@ -10,7 +10,7 @@ import { ArrowUp, Compass, CornerUpLeft, CornerUpRight, MoveUpLeft, MoveUpRight,
 import { useRouter } from "next/router";
 import { AdaptivePollingService } from "@/services/pollingService";
 import { NavigationProvider, useNavigation } from "@/hooks/useNavigation";
-import type { TargetReference } from "@/hooks/useNavigation";
+import type { M5AcceptedRouteIdentity, TargetReference } from "@/hooks/useNavigation";
 import ResearchLogPanel from "@/components/research/ResearchLogPanel";
 import { isExplicitM2ResearchMode } from "@/lib/research/m2Mode";
 import { finishM1FrontendAtActivation, holdM1FrontendCandidate } from "@/lib/research/m1Frontend";
@@ -801,7 +801,7 @@ function NavigationScreen() {
     const [totalDistance, setTotalDistance] = useState(0);
 
     // --- 💡 State สำหรับ MT-D* Lite ---
-    const { path, maneuverRoute, status, routeUxState, sessionId, start, stop, markArrived, eta, distance, updatePositions, routeVersion, routeSourceKey, endpointDiagnostics, restoreChecked, freshStartSequence, routeCandidateProvenance } = useNavigation();
+    const { path, maneuverRoute, status, routeUxState, sessionId, start, stop, markArrived, eta, distance, updatePositions, routeVersion, routeSourceKey, endpointDiagnostics, restoreChecked, freshStartSequence, routeCandidateProvenance, m5AcceptedRouteIdentity } = useNavigation();
     // ── Motion presentation state ───────────────────────────────────────────
 
     // displayAgentPosition: projected agent position on the route — drives marker rendering.
@@ -865,6 +865,8 @@ function NavigationScreen() {
     const [displayRouteSourcePath, setDisplayRouteSourcePath] = useState<LatLngPoint[]>([]);
     const displayRouteSourcePathRef = useRef<LatLngPoint[]>([]);
     const lastRouteSourceSignatureRef = useRef<string>('empty');
+    const m5RouteForRendererRef = useRef<(M5AcceptedRouteIdentity & { sourceSignature: string }) | null>(null);
+    const m5RendererLoggedIdsRef = useRef<Set<string>>(new Set());
     const lastRouteSourceBodySignatureRef = useRef<string>('empty');
     const lastRouteSourceRouteVersionRef = useRef<number>(routeVersion);
     const routeTrimProgressRef = useRef<number>(0);
@@ -1009,6 +1011,13 @@ function NavigationScreen() {
         const sameSignature = previousSignature === nextSignature;
         const sameBody = previousBodySignature === nextBodySignature;
         const recordRouteActivation = () => {
+            m5RouteForRendererRef.current = m5AcceptedRouteIdentity
+                && m5AcceptedRouteIdentity.researchRunId === getRecordingResearchRunId()
+                && m5AcceptedRouteIdentity.sessionId === sessionId
+                && m5AcceptedRouteIdentity.routeVersion === routeVersion
+                && m5AcceptedRouteIdentity.routeSourceKey === routeSourceKey
+                ? { ...m5AcceptedRouteIdentity, sourceSignature: nextSignature }
+                : null;
             if (!routeCandidateProvenance) return;
             const routeActivationSeq = routeActivationSeqRef.current + 1;
             routeActivationSeqRef.current = routeActivationSeq;
@@ -1293,7 +1302,7 @@ function NavigationScreen() {
             }
         }
 
-    }, [path, routeVersion, status, endpointDiagnostics, routeCandidateProvenance]);
+    }, [path, routeVersion, status, endpointDiagnostics, routeCandidateProvenance, m5AcceptedRouteIdentity]);
 
     // State สำหรับ UI
     const [arrivalTime, setArrivalTime] = useState("--:--");
@@ -1394,6 +1403,27 @@ function NavigationScreen() {
         }
 
         displayRouteSourcePathRef.current = clippedPath;
+        const m5Route = m5RouteForRendererRef.current;
+        const m5Key = m5Route ? `${m5Route.researchRunId}:${m5Route.routeUpdateId}` : null;
+        if (clippedPath.length >= 2 && m5Route && m5Key
+            && m5Route.researchRunId === getRecordingResearchRunId()
+            && m5Route.sourceSignature === lastRouteSourceSignatureRef.current
+            && !m5RendererLoggedIdsRef.current.has(m5Key)) {
+            const recorded = appendResearchObservationAt({
+                event: 'route_render_command_completed',
+                session_id: m5Route.sessionId,
+                route_update_id: m5Route.routeUpdateId,
+                route_version: m5Route.routeVersion,
+                route_source_key: m5Route.routeSourceKey,
+                route_signature: m5Route.routeSignature,
+                rendered_geometry_signature: computeRouteSourceSignature(clippedPath),
+                rendered_point_count: clippedPath.length,
+                outcome: 'success',
+                completion_kind: 'mapbox_geojson_source_setData_return',
+                visible_render_confirmed: false,
+            }, performance.now());
+            if (recorded !== null) m5RendererLoggedIdsRef.current.add(m5Key);
+        }
         return true;
     };
 

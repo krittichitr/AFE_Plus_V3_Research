@@ -69,11 +69,22 @@ check('G after stop', fixture({ stop: 3000, callbacks: [500, 1500, 2500], after:
 check('H inclusive boundary', fixture({ callbacks: [0, 4000] }), { status: 'OK', raw_callback_count: 2, median_interval_ms: 4000 });
 check('I duplicate time', fixture({ callbacks: [500, 500] }), { status: 'NON_MONOTONIC_TIMESTAMP' });
 check('J backwards time', fixture({ callbacks: [1500, 500] }), { status: 'NON_MONOTONIC_TIMESTAMP' });
-check('K invalid coordinate', fixture({ callbacks: [500, { monotonic_us: 1_500_000, coordinate_valid: false, latitude: null }, 2500] }), {
+const invalidCoordinate = check('K invalid coordinate', fixture({ callbacks: [500, { monotonic_us: 1_500_000, coordinate_valid: false, latitude: null }, 2500] }), {
   status: 'OK', raw_callback_count: 3, valid_callback_count: 2,
-  invalid_callback_count: 1, interval_count: 1, median_interval_ms: 2000,
+  invalid_callback_count: 1, interval_count: 2, median_interval_ms: 1000, p95_interval_ms: 1000,
 });
-check('L duplicate coordinates', fixture({ callbacks: [500, 1500] }), { status: 'OK', valid_callback_count: 2, interval_count: 1 });
+assert.deepEqual(invalidCoordinate.intervals.map((row) => [row.previous_location_sample_id, row.current_location_sample_id, row.interval_ms]),
+  [[3, 4, 1000], [4, 5, 1000]]);
+check('K invalid coordinate with missing receipt time', fixture({ callbacks: [500, { monotonic_us: undefined, coordinate_valid: false, latitude: null }, 2500] }), {
+  status: 'INCOMPLETE_LOG',
+});
+check('K invalid coordinate with backwards receipt time', fixture({ callbacks: [500, { monotonic_us: 400_000, coordinate_valid: false, latitude: null }, 2500] }), {
+  status: 'NON_MONOTONIC_TIMESTAMP',
+});
+check('K low accuracy', fixture({ callbacks: [500, { monotonic_us: 1_500_000, accuracy_m: 500 }, 2500] }), {
+  status: 'OK', raw_callback_count: 3, interval_count: 2, median_interval_ms: 1000,
+});
+check('L duplicate coordinates', fixture({ callbacks: [500, 1500] }), { status: 'OK', raw_callback_count: 2, valid_callback_count: 2, interval_count: 1 });
 check('M transient error', fixture({ callbacks: [500, 2500], between: [{ event: 'raw_location_error', monotonic_us: 1_500_000, error_code: 3 }] }), {
   status: 'OK', location_error_count: 1, interval_count: 1, median_interval_ms: 2000,
 });

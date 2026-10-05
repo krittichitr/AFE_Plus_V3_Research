@@ -99,6 +99,7 @@ try {
   };
   const browser = load(resolve(root, 'src/lib/research/provenanceEvents.ts'), {
     './clockSync': { probeResearchClockSync: async () => ({ success: true }) },
+    './clockSyncSchedule': null,
   }, { fetch: browserFetch, document: dom, URL: urlApi, Blob });
   await assert.rejects(browser.exportM2ResearchJournal(), /Run authorization unavailable/);
   await browser.startM2ResearchRun(run);
@@ -114,6 +115,7 @@ try {
   await assert.rejects(browser.exportM2ResearchJournal(), /Run authorization unavailable/);
   const reloaded = load(resolve(root, 'src/lib/research/provenanceEvents.ts'), {
     './clockSync': { probeResearchClockSync: async () => ({ success: true }) },
+    './clockSyncSchedule': null,
   }, { fetch: browserFetch, document: dom, URL: urlApi, Blob });
   await assert.rejects(reloaded.exportM2ResearchJournal(), /Run authorization unavailable/);
 

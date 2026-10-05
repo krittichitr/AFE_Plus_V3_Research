@@ -100,13 +100,14 @@ export function analyzeM4(rows) {
   if (Number.isSafeInteger(health.dropped_events) && health.dropped_events > 0) {
     return fail('DROPPED_EVENTS', 'Logger dropped one or more events');
   }
+  // Fail closed if any event lacks a finite client receipt time, including an invalid-coordinate callback.
   if (rows[0] !== runStart || rows.at(-1) !== health || rows.indexOf(runStop) <= 0
     || !Number.isSafeInteger(runStart.event_seq) || !Number.isSafeInteger(runStop.event_seq)
     || !Number.isSafeInteger(health.event_seq)
     || rows.some((row, index) => !Number.isSafeInteger(row.event_seq)
       || !finiteNumber(row.monotonic_us)
       || (index > 0 && row.event_seq !== rows[index - 1].event_seq + 1))) {
-    return fail('INCOMPLETE_LOG', 'Run boundary/order/event_seq is incomplete');
+    return fail('INCOMPLETE_LOG', 'Run boundary/order/event_seq or monotonic receipt time is incomplete');
   }
   if (!finiteNumber(runStart.monotonic_us) || !finiteNumber(runStop.monotonic_us)
     || runStop.monotonic_us <= runStart.monotonic_us
@@ -171,21 +172,21 @@ export function analyzeM4(rows) {
   if (relevantErrors.some((row) => isFatalError(row, rows, walkStop.monotonic_us))) {
     return fail('LOCATION_STREAM_ERROR', 'Fatal or unrecovered location error');
   }
-  if (valid.some((row) => !Number.isSafeInteger(row.event_seq)
+  if (raw.some((row) => !Number.isSafeInteger(row.event_seq)
     || !Number.isSafeInteger(row.location_sample_id)
     || row.location_sample_id !== row.event_seq)) {
-    return fail('INCOMPLETE_LOG', 'Valid callback missing location_sample_id/event_seq');
+    return fail('INCOMPLETE_LOG', 'Raw callback missing location_sample_id/event_seq');
   }
-  for (let index = 1; index < valid.length; index += 1) {
-    if (!finiteNumber(valid[index].monotonic_us)
-      || valid[index].monotonic_us <= valid[index - 1].monotonic_us) {
-      return fail('NON_MONOTONIC_TIMESTAMP', 'Valid callback receipt timestamps do not increase in event order');
+  for (let index = 1; index < raw.length; index += 1) {
+    if (!finiteNumber(raw[index].monotonic_us)
+      || raw[index].monotonic_us <= raw[index - 1].monotonic_us) {
+      return fail('NON_MONOTONIC_TIMESTAMP', 'Raw callback receipt timestamps do not increase in event order');
     }
   }
-  if (valid.length < 2) return fail('INSUFFICIENT_CALLBACKS', 'Fewer than two valid callbacks inside walking window');
+  if (raw.length < 2) return fail('INSUFFICIENT_CALLBACKS', 'Fewer than two raw callbacks inside measurement window');
 
-  output.intervals = valid.slice(1).map((row, index) => {
-    const previous = valid[index];
+  output.intervals = raw.slice(1).map((row, index) => {
+    const previous = raw[index];
     return {
       previous_location_sample_id: previous.location_sample_id,
       current_location_sample_id: row.location_sample_id,

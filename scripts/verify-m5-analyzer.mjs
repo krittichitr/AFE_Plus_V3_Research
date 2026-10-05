@@ -71,11 +71,57 @@ const addEpisode = (f, ep) => {
     if (i < sorted.length) start = sorted[i][1];
   }
 };
+const addRouteTimeline = (f, id) => {
+  const routeRows = [
+    { event: 'route_update_received', monotonic_us: 2_500_000, session_id: 'S', route_update_id: id, outcome: 'response_available' },
+    { event: 'route_frontend_accepted', monotonic_us: 3_500_000, session_id: 'S', route_update_id: id, route_version: 2, route_source_key: 1, route_signature: 'route-A', outcome: 'accepted_into_navigation_state' },
+    { event: 'route_render_command_completed', monotonic_us: 4_500_000, session_id: 'S', route_update_id: id, route_version: 2, route_source_key: 1, route_signature: 'route-A', outcome: 'success', visible_render_confirmed: false },
+  ];
+  f.rows.splice(f.rows.length - 3, 0, ...routeRows.map((row) => ({ ...row, research_run_id: 'R', platform: f.rows[0].platform })));
+  f.rows.sort((a, b) => a.monotonic_us - b.monotonic_us);
+  f.rows.forEach((row, index) => { row.event_seq = index + 1; });
+};
 check('A/X valid zero web', fixture(), 'OK', 0, 0);
 check('W valid zero mobile', fixture('mobile'), 'OK', 0, 0);
 for (const platform of ['web', 'mobile']) {
   const f = fixture(platform); addEpisode(f, episode('one', 3000, 4000, 4200, 4700));
-  check(`B/V one episode ${platform}`, f, 'OK', 1, 6);
+  const withoutRoute = check(`B/V one episode without route activity ${platform}`, f, 'OK', 1, 6);
+  assert.equal(withoutRoute.episodes[0].route_context.route_update_received.nearest_before, null);
+  assert.equal(withoutRoute.episodes[0].route_context.route_frontend_accepted.inside_count, 0);
+  addRouteTimeline(f, `${platform}-route-1`);
+  const withRoute = check(`M5 route timeline ${platform}`, f, 'OK', 1, 6);
+  const context = withRoute.episodes[0].route_context;
+  assert.equal(context.route_update_received.nearest_before.route_update_id, `${platform}-route-1`);
+  assert.equal(context.route_update_received.nearest_before.delta_to_stall_start_ms, -500);
+  assert.equal(context.route_frontend_accepted.nearest_inside.route_version, 2);
+  assert.equal(context.route_render_command_completed.nearest_inside.visible_render_confirmed, false);
+  assert.equal(context.route_render_command_completed.nearest_inside.delta_to_episode_end_ms, -200);
+  f.rows.push({ event: 'route_update_received', monotonic_us: 6_000_000,
+    research_run_id: 'R', platform, session_id: 'S', route_update_id: `${platform}-route-2` });
+  f.rows.sort((a, b) => a.monotonic_us - b.monotonic_us);
+  f.rows.forEach((row, index) => { row.event_seq = index + 1; });
+  const withLaterRoute = check(`route milestone after episode ${platform}`, f, 'OK', 1, 6);
+  assert.equal(withLaterRoute.episodes[0].route_context.route_update_received.nearest_after.route_update_id,
+    `${platform}-route-2`);
+  assert.equal(withLaterRoute.episodes[0].route_context.route_update_received.nearest_after.delta_to_episode_end_ms, 1300);
+}
+{
+  const f = fixture(); addRouteTimeline(f, 'web-route-no-stall');
+  check('route activity alone creates no M5 episode', f, 'OK', 0, 0);
+}
+{
+  const f = fixture(); addEpisode(f, episode('one', 3000, 4000, 4200, 4700)); addRouteTimeline(f, 'web-route-missing-accept');
+  f.rows = f.rows.filter((row) => row.event !== 'route_frontend_accepted');
+  f.rows.forEach((row, index) => { row.event_seq = index + 1; });
+  const result = check('missing route milestone does not fabricate context', f, 'OK', 1, 6);
+  assert.equal(result.episodes[0].route_context.route_frontend_accepted.nearest_inside, null);
+}
+{
+  const f = fixture(); addRouteTimeline(f, 'web-route-dropped');
+  f.rows.at(-1).dropped_events = 1;
+  f.rows.at(-1).dropped_by_event = { route_update_received: 1 };
+  f.rows.at(-1).event_seq += 1;
+  check('dropped route milestone fails closed', f, 'DROPPED_EVENTS');
 }
 {
   const f = fixture(); addEpisode(f, episode('one', 3000, 4000, 4200, 4700)); addEpisode(f, episode('two', 7000, 8000, 8200, 8700));

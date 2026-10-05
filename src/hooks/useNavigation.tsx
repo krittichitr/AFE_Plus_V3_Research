@@ -5,7 +5,7 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { NavigationService, LatLng, NavigationMode } from '@/lib/services/navigation.service';
 import type { NavigationManeuver, RouteProvenance } from '@/lib/navigation/types';
-import { getRecordingResearchRunId, getReadyM2ResearchContext, invalidateM2ResearchRun } from '@/lib/research/provenanceEvents';
+import { appendResearchObservationAt, getRecordingResearchRunId, getReadyM2ResearchContext, invalidateM2ResearchRun } from '@/lib/research/provenanceEvents';
 import { isExplicitM2ResearchMode } from '@/lib/research/m2Mode';
 import {
   acceptM1FrontendCandidate,
@@ -65,6 +65,15 @@ export type ManeuverRouteSnapshot = {
   maneuvers: NavigationManeuver[];
 };
 
+export type M5AcceptedRouteIdentity = {
+  researchRunId: string;
+  routeUpdateId: string;
+  sessionId: string;
+  routeVersion: number;
+  routeSourceKey: number;
+  routeSignature: string;
+};
+
 type NavigationContextType = {
   sessionId: string | null;
   path: LatLng[];
@@ -92,6 +101,7 @@ type NavigationContextType = {
   restoreChecked: boolean;
   freshStartSequence: number;
   routeCandidateProvenance: RouteProvenance | null;
+  m5AcceptedRouteIdentity: M5AcceptedRouteIdentity | null;
 };
 
 const NavigationContext = createContext<NavigationContextType | null>(null);
@@ -261,6 +271,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
   // Restore and silent server-session replacement never increment it.
   const [freshStartSequence, setFreshStartSequence] = useState(0);
   const [routeCandidateProvenance, setRouteCandidateProvenance] = useState<RouteProvenance | null>(null);
+  const [m5AcceptedRouteIdentity, setM5AcceptedRouteIdentity] = useState<M5AcceptedRouteIdentity | null>(null);
 
   const navService = useRef(new NavigationService()).current;
   useEffect(() => () => closePendingM1Frontend('aborted'), []);
@@ -810,6 +821,11 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
         const prevTail         = lastAppliedTailSigRef.current;
         const mapboxCalledNow  = updateMeta.lastMetric?.mapboxApiCalled === true;
         const refetchReasonNow = updateMeta.lastMetric?.refetchReason ?? updateMeta.refetchReason ?? null;
+        const previousRouteVersion = routeVersionRef.current;
+        const previousRouteSourceKey = routeSourceKeyRef.current;
+        let m5PathAccepted = false;
+        let m5VersionIncremented = false;
+        let m5SourceKeyIncremented = false;
         if (prevFull === null) {
           closeM1FrontendUpdate(routeProvenance.route_update_id, 'initial_route', 'initial');
         } else if (mapboxCalledNow || refetchReasonNow != null) {
@@ -825,6 +841,9 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
           lastAppliedFullSigRef.current = incomingFull;
           lastAppliedBodySigRef.current = incomingBody;
           lastAppliedTailSigRef.current = incomingTail;
+          m5PathAccepted = true;
+          m5VersionIncremented = true;
+          m5SourceKeyIncremented = true;
         } else if (mapboxCalledNow || refetchReasonNow != null) {
           // Branch 2: Mapbox API was called or explicit refetch — always new geometry.
           // Must come BEFORE duplicate check: a refetch could return same coords as
@@ -836,6 +855,9 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
           lastAppliedFullSigRef.current = incomingFull;
           lastAppliedBodySigRef.current = incomingBody;
           lastAppliedTailSigRef.current = incomingTail;
+          m5PathAccepted = true;
+          m5VersionIncremented = true;
+          m5SourceKeyIncremented = true;
         } else if (incomingFull === prevFull) {
           // Branch 3: Exact duplicate — skip apply entirely (no setPath, no increment)
           closeM1FrontendUpdate(routeProvenance.route_update_id, 'no_change');
@@ -849,9 +871,11 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
           setRouteCandidateProvenance(updateData.routeProvenance ?? null);
           lastAppliedFullSigRef.current = incomingFull;
           lastAppliedTailSigRef.current = incomingTail;
+          m5PathAccepted = true;
           // prevBody stays the same — endpoint is unchanged
           if (tailChanged) {
             incrementRouteVersion();
+            m5VersionIncremented = true;
             // Source key NOT incremented — MT-D* incremental replan must NOT remount Source
           } else {
             closeM1FrontendUpdate(routeProvenance.route_update_id, 'no_change');
@@ -865,6 +889,34 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
           lastAppliedFullSigRef.current = incomingFull;
           lastAppliedBodySigRef.current = incomingBody;
           lastAppliedTailSigRef.current = incomingTail;
+          m5PathAccepted = true;
+          m5VersionIncremented = true;
+        }
+
+        if (m5PathAccepted) {
+          const acceptedVersion = previousRouteVersion + Number(m5VersionIncremented);
+          const acceptedSourceKey = previousRouteSourceKey + Number(m5SourceKeyIncremented);
+          const recorded = routeProvenance.research_run_id === getRecordingResearchRunId()
+            ? appendResearchObservationAt({
+              event: 'route_frontend_accepted',
+              session_id: sessionId,
+              route_update_id: routeProvenance.route_update_id,
+              route_version: acceptedVersion,
+              route_source_key: acceptedSourceKey,
+              route_signature: incomingFull,
+              outcome: 'accepted_into_navigation_state',
+              boundary: 'react_state_update_enqueued',
+            }, performance.now())
+            : null;
+          const researchRunId = getRecordingResearchRunId();
+          setM5AcceptedRouteIdentity(recorded !== null && researchRunId ? {
+            researchRunId,
+            routeUpdateId: routeProvenance.route_update_id,
+            sessionId,
+            routeVersion: acceptedVersion,
+            routeSourceKey: acceptedSourceKey,
+            routeSignature: incomingFull,
+          } : null);
         }
 
         {
@@ -926,6 +978,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
       restoreChecked,
       freshStartSequence,
       routeCandidateProvenance,
+      m5AcceptedRouteIdentity,
     }}>
       {children}
     </NavigationContext.Provider>
