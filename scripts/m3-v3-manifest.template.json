@@ -1,0 +1,16 @@
+{
+  "schema_version": "m3-manifest-v3",
+  "protocol_version": "M3-PROTOCOL-V3",
+  "system_version": "V3",
+  "navigation": {
+    "file": "<explicit Navigation JSONL path; relative to this manifest>",
+    "research_run_id": "<exact recorded Navigation research_run_id>",
+    "session_id": "<exact recorded continuous Navigation session_id>",
+    "sha256": null
+  },
+  "sender": {
+    "file": null,
+    "sha256": null,
+    "intended_current_sender_session_ids": []
+  }
+}
